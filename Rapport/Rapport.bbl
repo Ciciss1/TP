@@ -1,0 +1,109 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.3 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated by
+% biber as required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+
+\refsection{0}
+  \datalist[entry]{none/global//global/global/global}
+    \entry{Yazyev2010}{article}{}{}
+      \name{author}{2}{}{%
+        {{hash=a9dc418095e15dbb90449136b8e8640c}{%
+           family={Yazyev},
+           familyi={Y\bibinitperiod},
+           given={Oleg\bibnamedelima V.},
+           giveni={O\bibinitperiod\bibinitdelim V\bibinitperiod}}}%
+        {{hash=033bd00ce6a0abe28043361e6118cbe9}{%
+           family={Louie},
+           familyi={L\bibinitperiod},
+           given={Steven\bibnamedelima G.},
+           giveni={S\bibinitperiod\bibinitdelim G\bibinitperiod}}}%
+      }
+      \strng{namehash}{6e654dcda77a568da0831eb3b4affcb9}
+      \strng{fullhash}{6e654dcda77a568da0831eb3b4affcb9}
+      \strng{fullhashraw}{6e654dcda77a568da0831eb3b4affcb9}
+      \strng{bibnamehash}{6e654dcda77a568da0831eb3b4affcb9}
+      \strng{authorbibnamehash}{6e654dcda77a568da0831eb3b4affcb9}
+      \strng{authornamehash}{6e654dcda77a568da0831eb3b4affcb9}
+      \strng{authorfullhash}{6e654dcda77a568da0831eb3b4affcb9}
+      \strng{authorfullhashraw}{6e654dcda77a568da0831eb3b4affcb9}
+      \field{sortinit}{1}
+      \field{sortinithash}{4f6aaa89bab872aa0999fec09ff8e98a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{issn}{1098-0121}
+      \field{issue}{19}
+      \field{journaltitle}{Physical Review B}
+      \field{month}{5}
+      \field{title}{Topological defects in graphene: Dislocations and grain boundaries}
+      \field{volume}{81}
+      \field{year}{2010}
+      \field{pages}{195420}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1103/PhysRevB.81.195420
+      \endverb
+      \verb{urlraw}
+      \verb https://link.aps.org/doi/10.1103/PhysRevB.81.195420
+      \endverb
+      \verb{url}
+      \verb https://link.aps.org/doi/10.1103/PhysRevB.81.195420
+      \endverb
+    \endentry
+    \entry{Wegner1967}{article}{}{}
+      \name{author}{1}{}{%
+        {{hash=c7204235856506ca158b10a61cda6826}{%
+           family={Wegner},
+           familyi={W\bibinitperiod},
+           given={Franz},
+           giveni={F\bibinitperiod}}}%
+      }
+      \strng{namehash}{c7204235856506ca158b10a61cda6826}
+      \strng{fullhash}{c7204235856506ca158b10a61cda6826}
+      \strng{fullhashraw}{c7204235856506ca158b10a61cda6826}
+      \strng{bibnamehash}{c7204235856506ca158b10a61cda6826}
+      \strng{authorbibnamehash}{c7204235856506ca158b10a61cda6826}
+      \strng{authornamehash}{c7204235856506ca158b10a61cda6826}
+      \strng{authorfullhash}{c7204235856506ca158b10a61cda6826}
+      \strng{authorfullhashraw}{c7204235856506ca158b10a61cda6826}
+      \field{sortinit}{2}
+      \field{sortinithash}{8b555b3791beccb63322c22f3320aa9a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{abstract}{We consider a D-dimensional system of classical spins rotating in a plane and interacting via a Heisenberg coupling. The spin-correlation function gD(r) is calculated for large distances r in a low-temperature approximation (taking into account short-range order): g~ (r) = exp (-C 1 rr), g2 (r)N r-c2 r, lira ga (r) = exp (-C a T). r-~ oo In two dimensions this model exhibits infinite susceptibility at low temperatures. Comparison is made of gl with the exact result and of ga with a spinwave-treatment showing agreement of In g(r) within order T. Spontaneous magnetization for D= 1 and 2 is ruled out exactly.}
+      \field{issn}{1434-6001}
+      \field{issue}{5}
+      \field{journaltitle}{Zeitschrift fur Physik}
+      \field{month}{10}
+      \field{title}{Spin-ordering in a planar classical Heisenberg model}
+      \field{volume}{206}
+      \field{year}{1967}
+      \field{pages}{465\bibrangedash 470}
+      \range{pages}{6}
+      \verb{doi}
+      \verb 10.1007/BF01325702
+      \endverb
+      \verb{urlraw}
+      \verb http://link.springer.com/10.1007/BF01325702
+      \endverb
+      \verb{url}
+      \verb http://link.springer.com/10.1007/BF01325702
+      \endverb
+    \endentry
+  \enddatalist
+\endrefsection
+\endinput
+
