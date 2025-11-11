@@ -1,99 +1,24 @@
-\documentclass{article}
-\usepackage{lineno,hyperref}
+documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-%\usepackage{cite}
-\usepackage{graphicx,amsmath}
-\usepackage{soul,color}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\geometry{margin=2cm}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{graphicx}
+\usepackage{amsmath, amsymb, amsthm}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
 \usepackage{siunitx}
-\usepackage{mhchem}
-\usepackage[sorting=none,citestyle=numeric-comp]{biblatex}
+\usepackage{physics}
+\usepackage{bm}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{biblatex}
 \bibliography{refs}
-\usepackage{lineno}
-%\linenumbers
-\usepackage[bottom=2cm, top=2cm, right=2cm, left=2.5cm]{geometry}
-\title{hexatic graphene}
-\author{Me}
-\date{\today}
 
-\begin{document}
-
-\maketitle
-
-\section{Correlation function}
-
-The Hamiltonian of the system is given by~\cite{Yazyev2010}:
-
-$$H = \frac{\epsilon}{\rho}\sum_i(\theta_i^2) + \frac{\gamma}{3\sqrt{\rho}}\sum_i \sum_{j\in N_i} (|\theta_i - \theta_j|)(A-\ln{(|\theta_i - \theta_j|))}$$
-
-where $\epsilon$ is a material-dependent constant, $\rho$ is the density of grains, $\gamma$ and $A$ are some constants. $N_i$ is the set of neighbors of grain $i$.
-
-The partition function is given by:
-
-$$\mathcal{Z} = \int \prod_i d\theta_i \exp{\left(-\beta \sum_i E_i\right)} = \int \prod_i d\theta_i \text{Tr}\left\{\exp{\left(-\beta H \right)}\right\}$$
-where $\beta = \frac{1}{k_B T}$, $k_B$ is the Boltzmann constant and $T$ is the temperature.
-
-\subsection{Large grain limit}
-
-In the limit of large grains, global alignment with substrate dominates grains boundaries energy, and the misorientation distribution becomes distance-independent
-
-$$\mathcal{Z} = \int \prod_i d\theta_i \exp{\left(-\beta \frac{\epsilon}{\rho}\sum_i \theta_i^2\right)} = \prod_i \int d\theta_i \exp{\left(-\beta \frac{\epsilon}{\rho}\theta_i^2\right)}$$
-
-So we have a gaussian distribution for each grain orientation $\theta_i$ with mean $0$ and variance $\sigma^2 = \frac{\rho}{2\beta\epsilon}$. 
-
-The correlation function is given by:
-
-$$C(\theta_i, \theta_j) = \langle \phi_i \phi_j^\star \rangle = \langle e^{i6(\theta_i - \theta_j)} \rangle$$
-
-As the angles are independent, we have:
-
-$$C(\theta_i, \theta_j) = \left|\langle e^{i6\theta_i} \rangle \right|^2 = \left| e^{-18\sigma^2} \right|^2 = e^{-18\frac{\rho}{\beta\epsilon}}$$
-
-
-\subsection{Small grain limit}
-
-In the limit of small grains, grain boundaries energy dominates global alignment with substrate. To compute the correlation function, the Kosterlitz-Thouless and Wegner~\cite{Wegner1967} approaches are used.
-
-The goal is to approximate the hamiltonian to a quadratic form. However, the function 
-$$|\theta_i - \theta_j|(A-\ln{(|\theta_i - \theta_j|)})$$ 
-is not differentiable at $0$. To overcome this issue, we approximate it by a differentiable function $f(x)$ such that $f(x) \approx x(A-\ln{(x)})$ for $x \gg 0$ and $f(x) \approx 0$ for $x \approx 0$. A possible choice is 
-$$f(x) = \sqrt{x^2 + a^2}\left(A-\ln{\left(\sqrt{x^2 + a^2}\right)}\right)$$ 
-where $a$ is a small parameter.
-
-We have:
-
-$$H = \frac{\epsilon}{\rho}\sum_i\theta_i^2 + \frac{\gamma}{3\sqrt{\rho}}\sum_i \sum_{j\in N_i} \left(\sqrt{|\theta_i - \theta_j|^2 + a^2}\right)\left(A-\frac{1}{2}\ln{\left(|\theta_i - \theta_j|^2 + a^2\right)}\right)$$
-
-Let $g_a (\Delta \theta)$ be the function defined by:
-
-$$g_a (\Delta \theta) = \left(\sqrt{|\Delta \theta|^2 + a^2}\right)\left(A-\frac{1}{2}\ln{\left(|\Delta \theta|^2 + a^2\right)}\right)$$
-
-For a small $\Delta \theta$ and assume $\Delta \theta \geq 0$, we can expand $g_a$:
-
-$$g_a (\Delta \theta) = cste + \frac{\Delta \theta^2}{2a}\left(A - \ln{a} - 1\right) + \mathcal{O}\left(\Delta \theta^4\right)$$
-
-So the grain boundary term can be approximated by a quadratic term for small misorientation angles. The hamiltonian becomes:
-
-$$H = \int d^2r \left[\frac{\mu}{2} \theta^2 + \frac{K}{2}(\nabla \theta)^2\right]$$
-where $\mu = \frac{2\epsilon}{\ell^2 \rho}$, $K = \frac{\gamma}{3\sqrt{\rho}}\frac{z}{2a}\left(A - \ln{a} - 1\right)$, $\ell$ is the average grain size and $z$ is the coordination number of the lattice.
-
-This is exactly an Hamiltonian of a massive gaussian field. In this case, we have:
-
-$$\left\langle \left(\theta(\textbf{r}) - \theta(0)\right)^2 \right\rangle = \frac{k_B T}{2 \pi K} \left(\ln{\frac{r}{\xi}} + K_0 \frac{r}{\xi}\right)$$
-where $\xi = \sqrt{\frac{K}{\mu}}$ is the correlation length.
-
-The correlation function is given by:
-
-$$G_6(r) = \left\langle e^{i6(\theta(\textbf{r}) - \theta(0))} \right\rangle = e^{-18\left\langle \left(\theta(\textbf{r}) - \theta(0)\right)^2 \right\rangle}$$
-
-So we have:
-
-$$G_6(r) = 
-\begin{cases} 
-      \left(\frac{r}{\ell}\right)^{-\eta_6} & \ell \ll r \ll \xi \\
-      \left(\frac{\xi}{\ell}\right)^{-\eta_6} e^{-\eta_6 K_0 r/\xi} & r \gg \xi \\
-\end{cases}
-$$
-where $\eta_6 = \frac{18 k_B T}{2 \pi K}$.
-
-\printbibliography
-\end{document}
