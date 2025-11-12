@@ -1,0 +1,87 @@
+\documentclass[11pt,a4paper, twoside]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\geometry{margin=2cm}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{siunitx}
+\usepackage{physics}
+\usepackage{bm}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{biblatex}
+\bibliography{refs.bib}
+
+\newcommand{\Titre}{Ordered, disordered and hexatic phases of Graphene}
+\newcommand{\Auteur}{Alexis ESCARMELLE}
+\newcommand{\Project}{TP IV}
+\newcommand{\Prof}{Oleg YAZYEV}
+\newcommand{\Date}{January 2026}
+\newcommand{\Section}{School of Basic Sciences}
+\newcommand{\Lab}{Chair of Computational Condensed Matter Physics}
+\newcommand{\EPFL}{Swiss Federal Institute of Technology in Lausanne}
+\newcommand{\Logo}{EPFL_Logo.png}
+
+\begin{document}
+
+\begin{titlepage}
+    \begin{center}
+
+        \vspace*{2cm}
+
+        {\Huge \Titre \par}
+
+        \vspace{2cm}
+
+        {\Large \Auteur \par}
+
+        \vspace{2cm}
+        {\large \Project \par}
+        {\large \Date \par}
+
+        \vspace{2cm}
+        {\large Professor: \Prof \par}
+
+        \vfill
+
+        \begin{tabular}{@{} m{6.2cm} @{\hspace{-0.1cm}} m{9cm} @{}}
+            \centering
+            \includegraphics[width=6.2cm]{\Logo} 
+            &
+            \begin{minipage}[b]{9cm}
+                \raggedright
+                \Section \\
+                \Lab \\
+                \EPFL
+            \end{minipage}
+        \end{tabular}
+
+        \vspace*{2cm}
+
+    \end{center}
+\end{titlepage}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\Auteur}
+\fancyhead[R]{\leftmark}
+\fancyfoot[C]{\thepage}
+
+\tableofcontents
+\newpage
+
+
+
+\printbibliography
+
+\end{document}
