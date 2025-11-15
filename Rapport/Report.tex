@@ -71,14 +71,23 @@
     \end{center}
 \end{titlepage}
 
+\tableofcontents
+\thispagestyle{empty}
+\newpage
+
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\Auteur}
-\fancyhead[R]{\leftmark}
+
+
+\fancyhead[LE]{\leftmark}
+\fancyhead[RE]{\rightmark}
+
+\fancyhead[LO]{\rightmark}
+\fancyhead[RE]{\leftmark}
+
 \fancyfoot[C]{\thepage}
 
-\tableofcontents
-\newpage
+\input{Sections/Introduction.tex}
 
 
 
