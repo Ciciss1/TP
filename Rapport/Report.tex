@@ -1,26 +1,34 @@
-\documentclass[11pt,a4paper, twoside]{article}
+\documentclass[11pt,a4paper,twoside]{article}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage[english]{babel}
+\usepackage{csquotes}
 \usepackage{lmodern}
 \usepackage{geometry}
 \geometry{margin=2cm}
 \usepackage{setspace}
 \onehalfspacing
+\raggedbottom
 \usepackage{graphicx}
 \usepackage{amsmath, amssymb, amsthm}
 \usepackage{hyperref}
 \usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
 \usepackage{caption}
 \usepackage{subcaption}
-\usepackage{siunitx}
 \usepackage{physics}
+\usepackage{siunitx}
+\AtBeginDocument{\RenewCommandCopy\qty\SI}
 \usepackage{bm}
 \usepackage{float}
 \usepackage{fancyhdr}
-\usepackage{biblatex}
+\setlength{\headheight}{14pt}
+\usepackage[style=IEEE, citestyle=numeric-comp]{biblatex}
 \bibliography{refs.bib}
+
+\setlength{\parskip}{0.5em}
 
 \newcommand{\Titre}{Ordered, disordered and hexatic phases of Graphene}
 \newcommand{\Auteur}{Alexis ESCARMELLE}
@@ -71,23 +79,36 @@
     \end{center}
 \end{titlepage}
 
-\tableofcontents
 \thispagestyle{empty}
-\newpage
+\tableofcontents
+\cleardoublepage
 
 \pagestyle{fancy}
 \fancyhf{}
-
 
 \fancyhead[LE]{\leftmark}
 \fancyhead[RE]{\rightmark}
 
 \fancyhead[LO]{\rightmark}
-\fancyhead[RE]{\leftmark}
+\fancyhead[RO]{\leftmark}
 
 \fancyfoot[C]{\thepage}
 
 \input{Sections/Introduction.tex}
+
+\clearpage
+
+\input{Sections/Model.tex}
+
+\clearpage
+
+\input{Sections/Simulation.tex}
+
+\clearpage
+
+\input{Sections/Results.tex}
+
+\clearpage
 
 
 

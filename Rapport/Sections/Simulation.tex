@@ -1,0 +1,55 @@
+\section{Simulation Method}
+
+To study the behavior of the polycrystalline graphene system described by the Hamiltonian above, we employ a Monte Carlo simulation approach using the Metropolis algorithm. The simulation is performed on a two-dimensional hexagonal lattice of size $L \times L$, where each lattice site represents a grain with an associated orientation angle $\theta_i$. In addition to the standard Metropolis updates, we implement over-relaxation moves to enhance the sampling efficiency and reduce autocorrelation times. A cluster algorithm is also used at low temperatures to pass energy barriers and improve convergence. These methods are performed every choosen $n$ steps and are detailed for the XY model in the book \textit{Statistical Mechanics: Algorithms and Computations} by Werner Krauth \cite{Krauth2006}.
+
+\begin{algorithm}[H]
+\caption{Standard Monte Carlo Step}
+\begin{algorithmic}[1]
+\STATE Choose a random grain $(i,j)$
+\STATE Propose a new orientation angle $\theta'_{ij} = \theta_{ij} + \delta \theta$ with $\delta \theta \in [-\Delta, \Delta]$
+\STATE Compute the energy difference $\Delta E = \mathcal{H}(\theta'_{ij}) - \mathcal{H}(\theta_{ij})$
+\STATE Accept the new angle with probability $P_{\text{accept}} = \min(1, e^{-\beta \Delta E})$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Over-Relaxation Step}
+\begin{algorithmic}[1]
+\FOR{each grain $i$}
+    \STATE Compute the local effective field $h_i = \sum_{j \in \text{nn}_i} J_{ij} \theta_j$
+    \STATE Update the orientation angle $\theta_i' = 2 \frac{h_i}{6} - \theta_i$
+    \STATE Compute the energy difference $\Delta E = \mathcal{H}(\theta_i') - \mathcal{H}(\theta_i)$
+    \STATE Accept the new angle with probability $P_{\text{accept}} = \min(1, e^{-\beta \Delta E})$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[H]
+\caption{Cluster Update Step}
+\begin{algorithmic}[1]
+\STATE Choose a random seed grain and initialize the cluster $\mathcal{C}$
+\STATE Grow the cluster by adding neighboring grains with small angle mismatchif $|\Delta \theta_{ij}| < \text{tol}$, add grain $j$ to cluster $\mathcal{C}$
+\STATE Estimate the collective rotation angle $\Delta\theta$ (median of boundary mismatches)
+\STATE Compute the energy change associated with rotating the whole cluster 
+\STATE Accept the rotation with probability $P_{\text{accept}} = \min(1, e^{-\beta \Delta E})$
+\end{algorithmic}
+\end{algorithm}
+
+Then, the simulation proceeds as follows:
+\begin{algorithm}[H]
+\caption{Monte Carlo Simulation Procedure}
+\begin{algorithmic}[1]
+\STATE Initialize the hexagonal lattice with random grain orientations $\theta_i \in [-\pi/6, \pi/6]$ with open boundary conditions
+\FOR{$n_{steps\_therm}$}
+    \STATE Perform a standard Monte Carlo step
+    \STATE Perform an over-relaxation step every $n_{overrelax}$ steps
+    \STATE Perform a cluster update step every $n_{cluster}$ steps
+    \STATE Adjust $\Delta$ to maintain an acceptance ratio of $\sim 50\%$ every $n_{tune}$ steps
+\ENDFOR
+
+\FOR{$n_{steps\_meas}$}
+    \STATE Perform a standard Monte Carlo step
+    \STATE Measure and save observables every $n_{measure}$ steps
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
