@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from numba import njit
+from tqdm import tqdm
 from pathlib import Path
 import os
 
@@ -363,6 +364,7 @@ class Simulation:
             shrink_factor = 0.95,
             min_delta = 0.001,
             max_delta = np.pi,
+            use_tqdm = False,
     ):
         self.lattice = Lattice(L, rho)
         self.L = L
@@ -375,6 +377,7 @@ class Simulation:
         self.n_meas = n_meas
         self.overrelax_interval = overrelax_interval
         self.meas_interval = meas_interval
+        self.use_tqdm = use_tqdm
 
         self.tune_interval = tune_interval
         self.delta_theta = delta_init
@@ -422,8 +425,13 @@ class Simulation:
         neighbors = self.lattice.neighbors
         bin_indices = self.lattice.bin_indices
 
+        if self.use_tqdm:
+            therm_range = tqdm(range(self.n_therm), desc="Thermalization")
+        else:
+            therm_range = range(self.n_therm)
+
         ## Thermalization
-        for step in range(1, self.n_therm + 1):
+        for step in therm_range:
             if self.overrelax_interval > 0 and step % self.overrelax_interval == 0:
                 overrelaxation_sweep(theta_flat, neighbors)
 
@@ -441,11 +449,16 @@ class Simulation:
                 E = energy(theta_flat, neighbors, self.J)/self.lattice.N
                 self.energy.append(E)
 
+        if self.use_tqdm:
+            meas_range = tqdm(range(self.n_meas), desc="Measurement")
+        else:
+            meas_range = range(self.n_meas)
+
         ## Measurement
         Gs = []
         mags = []
 
-        for step in range(1, self.n_meas + 1):
+        for step in meas_range:
             metropolis_sweep(
                 theta_flat, neighbors, self.beta, self.delta_theta, self.J
             )
@@ -464,8 +477,8 @@ class Simulation:
         self.G_err = np.std(Gs, axis=0) / np.sqrt(Gs.shape[0])
 
         mags = np.array(mags)
-        self.chi = self.lattice.N * (np.mean(mags**2) - np.mean(mags)**2)
-        self.chi_err = np.std(mags**2) / np.sqrt(mags.size) * self.lattice.N
+        self.chi = self.lattice.N * (np.mean(mags**2) - np.mean(mags)**2) / self.T
+        self.chi_err = np.std(mags**2) / np.sqrt(mags.size) * self.lattice.N / self.T
 
         self.lattice.theta = theta_flat.reshape((self.L, self.L))
 
@@ -647,6 +660,7 @@ def plot_chi_vs_T(base_path, L):
     plt.title(rf"Susceptibility $\chi$ vs Temperature for $L={L}$")
     plt.xlabel(r"$T$")
     plt.ylabel(r"$\chi$")
+    plt.ylim(-1, max(chi) * 1.1)
     plt.grid()
     plt.tight_layout()
     plt.savefig(f"{base_path}/chi_L{L}.pdf")
