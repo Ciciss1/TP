@@ -1,0 +1,12 @@
+model = "Model"
+L = 32
+T = [0.4, 0.6, 0.8]
+J = 1.0
+epsilon = 1.0
+gamma = 0.0
+A = 1.0
+rho = 1.0
+n_therm = 10**5
+n_meas = 10**4
+overrelax_interval = n_therm // 100
+meas_interval = n_meas // 10

@@ -1,43 +1,74 @@
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import os
 from tqdm import tqdm
-import MC_XY as mc
+import MC_XY as mc_xy
+import MC_model as mc_model
 
-def run_one_sim(L, T, J, rho, n_therm, n_meas, overrelax_interval, meas_interval):
 
-    path = f"XY/J{J}/L{L}/T{T:.3e}"
-    sim = mc.Simulation(L, T, J, rho, n_therm=n_therm, n_meas=n_meas, overrelax_interval=overrelax_interval, meas_interval=meas_interval)
+def run_one_sim_XY(geom, T, J, n_therm, n_meas, overrelax_interval, meas_interval):
+    path = f"XY/J{J}/L{geom.L}/T{T:.3e}"
+    sim = mc_xy.Simulation(geom, T, J, n_therm, n_meas, overrelax_interval, meas_interval, use_tqdm=False)
+    sim.run(path)
+
+def run_one_sim_model(geom, T, epsilon, gamma, A, n_therm, n_meas, overrelax_interval, meas_interval):
+    path = f"Model/epsilon{epsilon}_gamma{gamma}/L{geom.L}/T{T:.3e}"
+    sim = mc_model.Simulation(geom, T, epsilon, gamma, A, n_therm, n_meas, overrelax_interval, meas_interval, use_tqdm=False)
     sim.run(path)
 
 if __name__ == "__main__":
-    L = 128
-    T = [10**(-5), 0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 2.0]
-    J = 1.0
-    rho = 1.0
+    params = {}
+    with open("parameters.txt") as f:
+        exec(f.read(), {}, params)
 
-    n_therm = 10**5
-    n_meas = 10**4
-    overrelax_interval = n_therm // 100
-    meas_interval = n_meas // 10
+    model = params["model"]
+    L = params["L"]
+    T = params["T"]
+    J = params["J"]
+    epsilon = params["epsilon"]
+    gamma = params["gamma"]
+    A = params["A"]
+    rho = params["rho"]
+    n_therm = params["n_therm"]
+    n_meas = params["n_meas"]
+    overrelax_interval = params["overrelax_interval"]
+    meas_interval = params["meas_interval"]
 
-    n_workers = min(4, len(T))
+    if model == "XY":
+        geom = mc_xy.Geometry(L, rho)
+    elif model == "Model":
+        geom = mc_model.Geometry(L, rho)
+    else:
+        raise ValueError(f"Unknown model: {model}")
+
+    n_workers = min(8, len(T))
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = []
+        
         for temp in T:
-            futures.append(
-                executor.submit(
-                    run_one_sim,
-                    L,
+            if model == "XY":
+                futures.append(executor.submit(
+                    run_one_sim_XY,
+                    geom,
                     temp,
                     J,
-                    rho,
                     n_therm,
                     n_meas,
                     overrelax_interval,
-                    meas_interval,
-                )
-            )
+                    meas_interval
+                ))
+            elif model == "Model":
+                futures.append(executor.submit(
+                    run_one_sim_model,
+                    geom,
+                    temp,
+                    epsilon,
+                    gamma,
+                    A,
+                    n_therm,
+                    n_meas,
+                    overrelax_interval,
+                    meas_interval
+                ))
 
         for future in tqdm(as_completed(futures), total=len(futures), desc="Simulations"):
             future.result()
