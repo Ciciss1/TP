@@ -651,7 +651,7 @@ def plot_results(path, L, T, epsilon, rho, size=20):
     plt.savefig(f"{path}/energy_T{T:.3e}_L{L}.pdf")
     plt.close()
 
-    G_th = np.exp(-18 * rho * T / epsilon)
+    # G_th = np.exp(-18 * rho * T / epsilon)
 
     r_min = r[1]
     r_max = r[-1] / 2
@@ -682,9 +682,9 @@ def plot_results(path, L, T, epsilon, rho, size=20):
     plt.figure(figsize=(8, 6))
     plt.plot(r, G, label="Simulation Data", alpha=0.7, color='blue')
     plt.fill_between(r, G - G_err, G + G_err, color='blue', alpha=0.2)
-    plt.axhline(G_th, color='red', linestyle='--', label=rf"Theoretical $G_{{th}}={G_th:.3f}$")
-    # plt.plot(r, G_power_fit, "g--", label=rf"Power-law Fit, $\eta={eta:.3f}\pm{eta_err:.3f}$")
-    # plt.plot(r, G_expo_fit, "m--", label=rf"Exponential Fit, $\xi={xi:.3f}\pm{xi_err:.3f}$")
+    # plt.axhline(G_th, color='red', linestyle='--', label=rf"Theoretical $G_{{th}}={G_th:.3f}$")
+    plt.plot(r, G_power_fit, "g--", label=rf"Power-law Fit, $\eta={eta:.3f}\pm{eta_err:.3f}$")
+    plt.plot(r, G_expo_fit, "m--", label=rf"Exponential Fit, $\xi={xi:.3f}\pm{xi_err:.3f}$")
     plt.title(rf"Correlation Function at $T={T:.2e}$, $L={L}$")
     plt.xlabel(r"$r$")
     plt.ylabel(r"$G(r)$")
@@ -743,3 +743,55 @@ def plot_eta_vs_T(base_path, L):
     plt.savefig(f"{base_path}/eta_L{L}.pdf")
     plt.close()
 
+def plot_chi_vs_L(base_path, Ts):
+    chi_files = list(Path(base_path).glob("*/chi_L*.csv"))
+    print("base_path =", base_path)
+    print("n chi_files =", len(chi_files))
+    
+    L_values = []
+    chi_vals = {T: [] for T in Ts}
+    chi_errs = {T: [] for T in Ts}
+
+    for chi_file in chi_files:
+        L_str = chi_file.stem.split("_L")[-1]
+        L = int(L_str)
+        L_values.append(L)
+
+        data = np.loadtxt(chi_file, delimiter=",", skiprows=1)
+        if data.ndim == 1:
+            data = data.reshape(1, -1)
+
+        for T in Ts:
+            mask = np.isclose(data[:, 0], T, atol=1e-8)
+            if np.any(mask):
+                chi_vals[T].append(data[mask, 1][0])
+                chi_errs[T].append(data[mask, 2][0])
+            else:
+                chi_vals[T].append(0.0)
+                chi_errs[T].append(0.0)
+
+    L_values = np.array(L_values)
+    sorted_indices = np.argsort(L_values)
+
+    L_values = L_values[sorted_indices]
+    for T in Ts:
+        chi_vals[T] = np.array(chi_vals[T])[sorted_indices]
+        chi_errs[T] = np.array(chi_errs[T])[sorted_indices]
+
+    plt.figure(figsize=(8, 6))
+    for T in Ts:
+        plt.errorbar(
+            1/L_values,
+            chi_vals[T],
+            yerr=chi_errs[T],
+            fmt="-x",
+            label=rf"$T={T:.3e}$"
+        )
+    plt.title(rf"Susceptibility $\chi$ vs System Size $L^{-1}$")
+    plt.xlabel(r"$L^{-1}$")
+    plt.ylabel(r"$\chi$")
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(f"{base_path}/chi_vs_L.pdf")
+    plt.close()
