@@ -1,7 +1,7 @@
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 import MC_XY as mc_xy
-import MC_model as mc_model
+import MC_ln as mc_ln
 
 
 def run_one_sim_XY(geom, T, J, n_therm, n_meas, overrelax_interval, meas_interval):
@@ -9,9 +9,9 @@ def run_one_sim_XY(geom, T, J, n_therm, n_meas, overrelax_interval, meas_interva
     sim = mc_xy.Simulation(geom, T, J, n_therm, n_meas, overrelax_interval, meas_interval, use_tqdm=False)
     sim.run(path)
 
-def run_one_sim_model(geom, T, epsilon, gamma, A, n_therm, n_meas, overrelax_interval, meas_interval):
+def run_one_sim_ln(geom, T, epsilon, gamma, A, n_therm, n_meas, overrelax_interval, meas_interval):
     path = f"Model/epsilon{epsilon}_gamma{gamma}/L{geom.L}/T{T:.3e}"
-    sim = mc_model.Simulation(geom, T, epsilon, gamma, A, n_therm, n_meas, overrelax_interval, meas_interval, use_tqdm=False)
+    sim = mc_ln.Simulation(geom, T, epsilon, gamma, A, n_therm, n_meas, overrelax_interval, meas_interval, use_tqdm=False)
     sim.run(path)
 
 if __name__ == "__main__":
@@ -31,15 +31,16 @@ if __name__ == "__main__":
     n_meas = params["n_meas"]
     overrelax_interval = params["overrelax_interval"]
     meas_interval = params["meas_interval"]
+    coeur = params["coeur"]
 
     if model == "XY":
         geom = mc_xy.Geometry(L, rho)
-    elif model == "Model":
-        geom = mc_model.Geometry(L, rho)
+    elif model == "ln":
+        geom = mc_ln.Geometry(L, rho)
     else:
         raise ValueError(f"Unknown model: {model}")
 
-    n_workers = min(8, len(T))
+    n_workers = min(coeur, len(T))
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = []
@@ -56,9 +57,9 @@ if __name__ == "__main__":
                     overrelax_interval,
                     meas_interval
                 ))
-            elif model == "Model":
+            elif model == "ln":
                 futures.append(executor.submit(
-                    run_one_sim_model,
+                    run_one_sim_ln,
                     geom,
                     temp,
                     epsilon,

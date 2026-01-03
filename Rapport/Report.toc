@@ -1,9 +1,0 @@
-\babel@toc {english}{}\relax 
-\contentsline {section}{\numberline {1}Introduction}{3}{section.1}%
-\contentsline {section}{\numberline {2}Polycristalline Model}{4}{section.2}%
-\contentsline {subsection}{\numberline {2.1}Hamiltonian}{4}{subsection.2.1}%
-\contentsline {subsection}{\numberline {2.2}Observables}{4}{subsection.2.2}%
-\contentsline {section}{\numberline {3}Simulation Method}{6}{section.3}%
-\contentsline {section}{\numberline {4}Test on the XY model}{8}{section.4}%
-\contentsline {section}{\numberline {5}$\epsilon = 1.0, \gamma = 0.0$}{8}{section.5}%
-\contentsline {section}{\numberline {6}$\epsilon = 0.0, \gamma = 1.0$}{8}{section.6}%

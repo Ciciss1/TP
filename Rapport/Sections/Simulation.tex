@@ -1,55 +1,70 @@
 \section{Simulation Method}
 
-To study the behavior of the polycrystalline graphene system described by the Hamiltonian above, we employ a Monte Carlo simulation approach using the Metropolis algorithm. The simulation is performed on a two-dimensional hexagonal lattice of size $L \times L$, where each lattice site represents a grain with an associated orientation angle $\theta_i$. In addition to the standard Metropolis updates, we implement over-relaxation moves to enhance the sampling efficiency and reduce autocorrelation times. A cluster algorithm is also used at low temperatures to pass energy barriers and improve convergence. These methods are performed every choosen $n$ steps and are detailed for the XY model in the book \textit{Statistical Mechanics: Algorithms and Computations} by Werner Krauth \cite{Krauth2006}.
+To study the behavior of the polycrystalline graphene system described by the Hamiltonian above, a Monte Carlo simulation approach using the Metropolis algorithm is employed. The simulation is performed on a two-dimensional hexagonal lattice of size $L$ with $N = L \times L$ sites, where each lattice site represents a grain with an associated orientation angle $\theta_i$. The equilibrium configurations are sampled using the Metropolis algorithm and deterministic angular reflection moves inspired by over-relaxation techniques used in the XY model. 
 
-\begin{algorithm}[H]
-\caption{Standard Monte Carlo Step}
-\begin{algorithmic}[1]
-\STATE Choose a random grain $(i,j)$
-\STATE Propose a new orientation angle $\theta'_{ij} = \theta_{ij} + \delta \theta$ with $\delta \theta \in [-\Delta, \Delta]$
-\STATE Compute the energy difference $\Delta E = \mathcal{H}(\theta'_{ij}) - \mathcal{H}(\theta_{ij})$
-\STATE Accept the new angle with probability $P_{\text{accept}} = \min(1, e^{-\beta \Delta E})$
-\end{algorithmic}
-\end{algorithm}
+\subsection{Local Metropolis Updates}
 
-\begin{algorithm}[H]
-\caption{Over-Relaxation Step}
-\begin{algorithmic}[1]
-\FOR{each grain $i$}
-    \STATE Compute the local effective field $h_i = \sum_{j \in \text{nn}_i} J_{ij} \theta_j$
-    \STATE Update the orientation angle $\theta_i' = 2 \frac{h_i}{6} - \theta_i$
-    \STATE Compute the energy difference $\Delta E = \mathcal{H}(\theta_i') - \mathcal{H}(\theta_i)$
-    \STATE Accept the new angle with probability $P_{\text{accept}} = \min(1, e^{-\beta \Delta E})$
-\ENDFOR
-\end{algorithmic}
-\end{algorithm}
+During a Monte Carlo sweep, $N$ update attempts are made. At each attempt, a random grain $i$ is selected, and a new orientation angle is proposed according to:
+\begin{equation}
+    \theta_i' = \theta_i + \delta \theta,
+    \qquad
+    \delta \theta \in [-\Delta, \Delta]
+\end{equation}
 
-\begin{algorithm}[H]
-\caption{Cluster Update Step}
-\begin{algorithmic}[1]
-\STATE Choose a random seed grain and initialize the cluster $\mathcal{C}$
-\STATE Grow the cluster by adding neighboring grains with small angle mismatchif $|\Delta \theta_{ij}| < \text{tol}$, add grain $j$ to cluster $\mathcal{C}$
-\STATE Estimate the collective rotation angle $\Delta\theta$ (median of boundary mismatches)
-\STATE Compute the energy change associated with rotating the whole cluster 
-\STATE Accept the rotation with probability $P_{\text{accept}} = \min(1, e^{-\beta \Delta E})$
-\end{algorithmic}
-\end{algorithm}
+Where $\Delta$ is the maximum angular step size. The proposed move is accepted with the standard Metropolis probability:
+\begin{equation}
+    P_{\text{accept}} = \min\left(1, e^{-\beta \Delta E}\right)
+\end{equation}
 
-Then, the simulation proceeds as follows:
+Where $\Delta E = \mathcal{H}(\theta_i') - \mathcal{H}(\theta_i)$ is the energy difference resulting from the Hamiltonian defined in \cref{eq:hamiltonian}. The parameter $\Delta$ is dynamically adjusted during the thermalization phase to maintain an acceptance ratio of approximately 50\%.
+
+\subsection{Over-relaxation Updates}
+
+In addition to stochastic Metropolis moves, deterministic angular reflection updates are incorporated to enhance sampling efficiency. This method is inspired by over-relaxation techniques for the XY model \cite{Krauth2006}. In the XY model, such moves are microcanonical and preserve energy. However, due to the more complex interactions in our Hamiltonian, the energy is not strictly conserved. Therefore, the proposed over-relaxation move is accepted with the same Metropolis criterion as above. For a selected grain $i$, a local reference orientation is computed:
+\begin{equation}
+    \mathbf{S}_i = \sum_{j \in nn_i} \left( \cos(6 \theta_j) ; \sin(6 \theta_j) \right)
+\end{equation}
+\begin{equation}
+    \phi_i = \mathrm{atan2}(S_{i,y}, S_{i,x})
+\end{equation}
+
+The proposed update is then:
+\begin{equation}
+    \theta_i' = 2 \frac{\phi_i}{6} - \theta_i
+\end{equation}
+
+And the acceptance probability follows the Metropolis criterion. Although these moves do not constitute a microcanonical update, they help the system explore the configuration space more effectively.
+
+\subsection{Angular Domain and Boundary Conditions}
+
+Due to the sixfold symmetry of the graphene lattice, grain orientations are defined modulo $\pi/3$. Therefore, the orientation angles are restricted to the interval:
+\begin{equation}
+    \theta_i \in \left[-\frac{\pi}{6}, \frac{\pi}{6}\right]
+\end{equation}
+
+Which eliminates redundant configurations. Open boundary conditions are applied to the lattice, allowing grains at the edges to have fewer neighbors. This choice reflects the physical reality of finite graphene samples rather than an infinite periodic system.
+
+\subsection{Simulation Procedure}
+
+Each simulation is divided into a thermalization phase and a measurement phase. During the thermalization phase, the angular step size $\Delta$ is adjusted and the system is allowed to reach equilibrium. In the measurement phase, observables are recorded at regular intervals to ensure statistical independence.
+
 \begin{algorithm}[H]
 \caption{Monte Carlo Simulation Procedure}
 \begin{algorithmic}[1]
-\STATE Initialize the hexagonal lattice with random grain orientations $\theta_i \in [-\pi/6, \pi/6]$ with open boundary conditions
+\STATE Initialize $\{\theta_i\} \in \left[-\frac{\pi}{6}, \frac{\pi}{6}\right]$ uniformly at random
 \FOR{$n_{steps\_therm}$}
-    \STATE Perform a standard Monte Carlo step
-    \STATE Perform an over-relaxation step every $n_{overrelax}$ steps
-    \STATE Perform a cluster update step every $n_{cluster}$ steps
+    \STATE Perform a standard Monte Carlo sweep
+    \STATE Perform an over-relaxation sweep every $n_{overrelax}$ steps
     \STATE Adjust $\Delta$ to maintain an acceptance ratio of $\sim 50\%$ every $n_{tune}$ steps
 \ENDFOR
 
 \FOR{$n_{steps\_meas}$}
-    \STATE Perform a standard Monte Carlo step
+    \STATE Perform a standard Monte Carlo sweep
     \STATE Measure and save observables every $n_{measure}$ steps
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}
+
+\subsection{Measurements and Statistical Analysis}
+
+During the measurement phase, the bound-orientationnal correlation function $G_6(r)$, the global order parameter $\Psi_6$, and the corresponding susceptibility $\chi_6$ are computed. Measurements are separated by several Monte Carlo sweeps to reduce autocorrelation effects and ensure statistical independence.

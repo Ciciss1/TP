@@ -658,29 +658,36 @@ def plot_results(path, L, T, J, size=20):
     eta_err = np.sqrt(cov_power_decay[0, 0])
     A1 = np.exp(b_power)
 
+    logA_th = np.mean(np.log(G[mask_fit]) + eta_th * np.log(r[mask_fit]))
+    A_th = np.exp(logA_th)
+
+    r_min = r[0]
+    r_max = r[-1]/4
+    mask_fit = (r >= r_min) & (r <= r_max) & (G > 0)
+
     coef_expo_decay, cov_expo_decay = np.polyfit(
         r[mask_fit], np.log(G[mask_fit]), 1, cov=True
     )
     a_expo, b_expo = coef_expo_decay
-    xi = -1.0 / a_expo
-    xi_err = xi**2 * np.sqrt(cov_expo_decay[0, 0])
-    A2 = np.exp(b_expo)
+    xi = -1 / a_expo
+    xi_err = np.sqrt(cov_expo_decay[0, 0]) / (a_expo**2)
+    A_expo = np.exp(b_expo)
 
     update_eta_xi_file(path, T, L, eta, eta_err, xi, xi_err)
 
     G_power_fit = A1 * r[1:] ** (-eta)
     G_power_fit = np.insert(G_power_fit, 0, G[0])
-    G_th = A1 * r[1:] ** (-eta_th)
+    G_th = A_th * r[1:] ** (-eta_th)
     G_th = np.insert(G_th, 0, G[0])
-    G_expo_fit = A2 * np.exp(-r/xi)
+    G_expo_fit = A_expo * np.exp(-r / xi)
 
     plt.figure(figsize=(8, 6))
     plt.plot(r, G, label="Simulation Data", alpha=0.7, color='blue')
     plt.fill_between(r, G - G_err, G + G_err, color='blue', alpha=0.2)
-    plt.plot(r, G_th, "r--", label=rf"Theoretical Decay, $\eta_{{th}}={eta_th:.3f}$")
+    # plt.plot(r, G_th, "r--", label=rf"Theoretical Decay, $\eta_{{th}}={eta_th:.3f}$")
     plt.plot(r, G_power_fit, "g--", label=rf"Power-law Fit, $\eta={eta:.3f}\pm{eta_err:.3f}$")
     plt.plot(r, G_expo_fit, "m--", label=rf"Exponential Fit, $\xi={xi:.3f}\pm{xi_err:.3f}$")
-    plt.title(rf"Correlation Function at $T={T:.2e}$, $L={L}$")
+    # plt.title(rf"Correlation Function at $T={T:.2e}$, $L={L}$")
     plt.xlabel(r"$r$")
     plt.ylabel(r"$G(r)$")
     plt.ylim(-0.1, 1.02)
@@ -712,7 +719,7 @@ def plot_chi_vs_T(base_path, L):
 
     plt.figure(figsize=(8, 6))
     plt.errorbar(T_values, chi, yerr=chi_err, fmt="-x", label="Simulation Data")
-    plt.title(rf"Susceptibility $\chi$ vs Temperature for $L={L}$")
+    # plt.title(rf"Susceptibility $\chi$ vs Temperature for $L={L}$")
     plt.xlabel(r"$T$")
     plt.ylabel(r"$\chi$")
     plt.ylim(-1, max(chi) * 1.1)
@@ -729,7 +736,8 @@ def plot_eta_vs_T(base_path, L):
 
     plt.figure(figsize=(8, 6))
     plt.errorbar(T_values, eta, yerr=eta_err, fmt="-x", label="Simulation Data")
-    plt.title(rf"Critical Exponent $\eta$ vs Temperature for $L={L}$")
+    plt.axhline(y=0.25, color='r', linestyle='--', label=r'$\eta=0.25$')
+    # plt.title(rf"Critical Exponent $\eta$ vs Temperature for $L={L}$")
     plt.xlabel(r"$T$")
     plt.ylabel(r"$\eta$")
     plt.ylim(-0.1, max(eta) * 1.1)
@@ -782,11 +790,49 @@ def plot_chi_vs_L(base_path, Ts):
             fmt="-x",
             label=rf"$T={T:.3e}$"
         )
-    plt.title(rf"Susceptibility $\chi$ vs System Size $L^{-1}$")
+    # plt.title(rf"Susceptibility $\chi$ vs System Size $L^{-1}$")
     plt.xlabel(r"$L^{-1}$")
     plt.ylabel(r"$\chi$")
     plt.legend()
     plt.grid()
     plt.tight_layout()
     plt.savefig(f"{base_path}/chi_vs_L.pdf")
+    plt.close()
+
+def plot_chi_vs_T_all_L(base_path):
+    chi_files = list(Path(base_path).glob("*/chi_L*.csv"))
+    print("base_path =", base_path)
+    print("n chi_files =", len(chi_files))
+    
+    plt.figure(figsize=(8, 6))
+
+    markers = ['x', '^', 'v']
+
+    for chi_file, marker in zip(chi_files, markers):
+        L_str = chi_file.stem.split("_L")[-1]
+        L = int(L_str)
+
+        data = np.loadtxt(chi_file, delimiter=",", skiprows=1)
+        if data.ndim == 1:
+            data = data.reshape(1, -1)
+
+        T_values = data[:, 0]
+        chi = data[:, 1]
+        chi_err = data[:, 2]
+
+        plt.errorbar(
+            T_values,
+            chi,
+            yerr=chi_err,
+            fmt=f"-{marker}",
+            label=rf"$L={L}$"
+        )
+
+    # plt.title(rf"Susceptibility $\chi$ vs Temperature for Various $L$")
+    plt.xlabel(r"$T$")
+    plt.ylabel(r"$\chi$")
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(f"{base_path}/chi_vs_T_all_L.pdf")
     plt.close()

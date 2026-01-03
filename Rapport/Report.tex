@@ -1,4 +1,4 @@
-\documentclass[11pt,a4paper,twoside]{article}
+\documentclass[11pt,a4paper,oneside]{article}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -10,9 +10,11 @@
 \usepackage{setspace}
 \onehalfspacing
 \raggedbottom
+\usepackage{placeins}
 \usepackage{graphicx}
 \usepackage{amsmath, amssymb, amsthm}
-\usepackage{hyperref}
+\usepackage[hidelinks]{hyperref}
+\usepackage[nameinlink]{cleveref}
 \usepackage{xcolor}
 \usepackage{algorithm}
 \usepackage{algorithmic}
@@ -28,12 +30,18 @@
 \usepackage[style=IEEE, citestyle=numeric-comp]{biblatex}
 \bibliography{refs.bib}
 
+\crefname{equation}{Eq.}{Eqs.}
+\crefname{figure}{Fig.}{Figs.}
+\crefname{table}{Tab.}{Tabs.}
+\crefname{section}{Sec.}{Secs.}
+
 \setlength{\parskip}{0.5em}
 
-\newcommand{\Titre}{Ordered, disordered and hexatic phases of Graphene}
+\newcommand{\Titre}{Ordered, Disordered and Hexatic Phases of Graphene}
 \newcommand{\Auteur}{Alexis ESCARMELLE}
 \newcommand{\Project}{TP IV}
 \newcommand{\Prof}{Oleg YAZYEV}
+\newcommand{\Doctorant}{Ruslan YAMALETDINOV}
 \newcommand{\Date}{January 2026}
 \newcommand{\Section}{School of Basic Sciences}
 \newcommand{\Lab}{Chair of Computational Condensed Matter Physics}
@@ -60,6 +68,8 @@
         \vspace{2cm}
         {\large Professor: \Prof \par}
 
+        {\large Postdoc: \Doctorant \par}
+
         \vfill
 
         \begin{tabular}{@{} m{6.2cm} @{\hspace{-0.1cm}} m{9cm} @{}}
@@ -79,18 +89,15 @@
     \end{center}
 \end{titlepage}
 
-\thispagestyle{empty}
+\pagestyle{empty}
 \tableofcontents
-\cleardoublepage
+\clearpage
 
 \pagestyle{fancy}
 \fancyhf{}
 
-\fancyhead[LE]{\leftmark}
-\fancyhead[RE]{\rightmark}
-
-\fancyhead[LO]{\rightmark}
-\fancyhead[RO]{\leftmark}
+\fancyhead[L]{\leftmark}
+\fancyhead[R]{\rightmark}
 
 \fancyfoot[C]{\thepage}
 
@@ -110,8 +117,11 @@
 
 \clearpage
 
+\input{Sections/Conclusion.tex}
 
+\clearpage
 
+\pagestyle{empty}
 \printbibliography
 
 \end{document}

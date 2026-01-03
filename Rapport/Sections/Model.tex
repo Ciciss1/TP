@@ -1,21 +1,25 @@
-\section{Polycristalline Model}
+\section{Polycrystalline Model}
 
 \subsection{Hamiltonian}
 
-In this project, we focus on a two-dimensional system of grains (crystallites) arranged in a hexagonal lattice structure. Each grain has an orientation angle, denoted by $\theta_i$, which represents its deviation from the substrate's preferred orientation. This configuration corresponds to a graphene sheet placed on a hexagonal substrate.
+The project focuses on a two-dimensional system of grains (crystallites) arranged on a hexagonal lattice structure. Each grain has an orientation angle, denoted by $\theta_i$, which represents its deviation from a fixed reference orientation. This configuration corresponds to a graphene sheet placed on a hexagonal substrate.
 
-In this system, the distribution of grain orientations is governed by two competing interactions: the substrate coupling \cite{Rogge2015}, which tends to align the grains with the substrate, and the grain boundary energy, which favors local alignment between neighboring grains. This interaction is expressed according to Read-Shockley model \cite{Read1950}. The total Hamiltonian $\mathcal{H}$ of the system can be written as:
-
+In graphene, grain boundaries are known to consist of periodic arrays of dislocations whose elastic interactions determine the energetic cost of misorientation between neighboring crystallites \cite{Yazyev2010}. The distribution of grain orientations is governed by two competing interactions: the substrate coupling \cite{Rogge2015}, which tends to align the grains with the substrate, and the grain boundary energy, which favors local alignment between neighboring grains. This interaction is expressed according to Read-Shockley model \cite{Read1950}. The total Hamiltonian $\mathcal{H}$ of the system can be written as:
 \begin{equation}
-    \mathcal{H} = \frac{\epsilon}{\rho} \sum_i \theta_i^2 + \frac{\gamma}{3\rho} \sum_i \sum_{j \in \text{nn}_i} \left|\Delta \theta_{ij}\right| \left(A - \log\left|\Delta \theta_{ij}\right|\right)
+    \mathcal{H} = \frac{\epsilon}{\rho} \sum_i \theta_i^2 + \frac{\gamma}{3\rho} \sum_i \sum_{j \in nn_i} \left|\Delta \theta_{ij}\right| \left(A - \log\left|\Delta \theta_{ij}\right|\right)
+    \label{eq:hamiltonian}
 \end{equation}
-Where $\epsilon$ is the substrate coupling strength, $\gamma$ is the grain boundary energy coefficient, $\rho$ is the grain density and $A$ is a constant related to the material properties. The term $\Delta \theta_{ij} = \theta_i - \theta_j$ represents the difference in orientation angles between neighboring grains $i$ and $j$, with the summation over $\text{nn}_i$ indicating that we only consider nearest neighbors.
+
+Where $\epsilon$ is the substrate coupling strength, $\gamma$ is the grain boundary energy coefficient, $\rho$ is the grain density and $A$ is a constant related to the material properties. The term $\Delta \theta_{ij} = \theta_i - \theta_j$ represents the difference in orientation angles between neighboring grains $i$ and $j$, with the summation over $nn_i$ indicating that we only consider nearest neighbors. From now, $\rho$ and $A$ are set to $1$ for simplicity.
 
 \subsection{Observables}
 
-We define several observables to characterize the phases in the system as described in the KTHNY theory \cite{ Nelson1978,Nelson1979,Kosterlitz1973,Young1979}.
+We define several observables to characterize the phases in the system as described in the KTHNY theory \cite{ Nelson1978,Nelson1979,Kosterlitz1973,Young1979}. To characterize the orientational order of the system, the local bond-orientational order parameter $\psi_6(\mathbf{r}_i)$ for each grain $i$ is defined as:
+\begin{equation}
+    \psi_6(\mathbf{r}_i) = \frac{1}{n_i} \sum_{j \in nn_i} e^{i 6 \theta_{ij}}
+\end{equation}
 
-To characterize the orientational order in the system, we define the local bond-orientational order parameter $\psi_6(\mathbf{r}_i)$ for each grain $i$ as:
+Where $n_i$ is the number of nearest neighbors of grain $i$, and $\theta_{ij}$ is the angle between a reference axis and the bond connecting grain $i$ to its neighbor $j$. This parameter captures the six-fold rotational symmetry characteristic of the hexagonal lattice structure. Here, a coarse-grained approximation is used. The local bond orientation of each grain is fully determined by its orientation angle $\theta_i$, so the local bond-orientational order parameter can be simplified to:
 \begin{equation}
     \psi_6(\mathbf{r}_i) = e^{i 6 \theta_i}
 \end{equation}
@@ -29,19 +33,21 @@ Where the average is taken over all pairs of grains $(i, j)$ separated by distan
 \begin{equation}
     G_6(r) \sim r^{-\eta_6}
 \end{equation}
+
 Where $\eta_6$ is a critical exponent characterizing the decay of orientational correlations. At the transition between hexatic and disordered phases, $\eta_6$ reaches a universal value of $1/4$. In contrast, in a disordered phase, $G_6(r)$ decays exponentially:
 \begin{equation}
     G_6(r) \sim e^{-r/\xi_6}
 \end{equation}
-Where $\xi_6$ is the orientational correlation length. In an ordered phase, $G_6(r)$ must be equal to a constant for large $r$, indicating long-range orientational order.
 
-In the case of $\gamma = 0$, the correlation function $G_6(r)$ can be computed analytically as:
+Where $\xi_6$ is the orientational correlation length. In an ordered phase, $G_6(r)$ must be equal to a constant for large $r$, indicating long-range orientational order. In the limiting case $\gamma = 0$, grain orientations become independent, leading to an exact expression for $G_6(r)$ \cite{Ruslan2025}:
 \begin{equation}
     G_6(r) = \exp\left(- 18 \rho \frac{k_B T}{\epsilon} \right)
+    \label{eq:theoricG6}
 \end{equation}
 
-The susceptibility associated with the bond-orientational order parameter, $\chi_6$, is defined as:
+Finally, the susceptibility associated with the bond-orientational order parameter, $\chi_6$, is defined as \cite{Weber1995}:
 \begin{equation}
-    \chi_6 = N \beta \left( \langle |\Psi_6|^2 \rangle - \langle |\Psi_6| \rangle^2 \right)
+    \chi_6 = N \beta \left( \left\langle |\Psi_6|^2 \right\rangle - \left\langle |\Psi_6| \right\rangle^2 \right)
 \end{equation}
-Where $N$ is the total number of grains in the system, $\beta = \frac{1}{k_B T}$ and $\Psi_6 = \frac{1}{N} \sum_i \psi_6(\mathbf{r}_i)$ is the global bond-orientational order parameter. This susceptibility measures the fluctuations in the bond-orientational order parameter and is expected to diverge at the phase transition between ordered and disordered phases.
+
+Where $N$ is the total number of grains in the system, $\beta = \frac{1}{k_B T}$ and $\Psi_6 = \frac{1}{N} \sum_i \psi_6(\mathbf{r}_i)$ is the global bond-orientational order parameter. This susceptibility measures the fluctuations in the bond-orientational order parameter. At the hexatic to disordered phase transition, $\chi_6$ is expected to diverge. In finite systems, this divergence manifests as a pronounced peak scaling with system size.
