@@ -1,12 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
 
-class PerodicVoronoi:
+class PeriodicVoronoi:
     def __init__(self, L, rho):
         '''
-        Create a periodic Voronoi lattice.
+        Create a periodic Voronoi lattice
         Attributes:
             L : size of the box
             rho : density of points
@@ -14,6 +16,7 @@ class PerodicVoronoi:
             points : coordinates of the points
             adj_i, adj_j : indices of adjacent points
             adj_length : length of the edge between adjacent points
+            theta : random orientation of the grains
         '''
         self.L = L
         self.rho = rho
@@ -23,6 +26,8 @@ class PerodicVoronoi:
                
         self.build_periodic_voronoi()
         self.get_adjacency()
+
+        self.theta = np.random.uniform(-np.pi/6, np.pi/6, self.N).astype(np.float64)
 
         
     def build_periodic_voronoi(self):
@@ -63,17 +68,18 @@ class PerodicVoronoi:
                 adj_j.append(j)
                 adj_length.append(length)
                 
-        self.adj_i = np.array(adj_i, dtype=np.int64)
-        self.adj_j = np.array(adj_j, dtype=np.int64)
+        self.adj_i = np.array(adj_i, dtype=np.int32)
+        self.adj_j = np.array(adj_j, dtype=np.int32)
         self.adj_length = np.array(adj_length, dtype=np.float64)
-
-    # def get_angles(self):
 
     def plot(self):
 
-        plt.figure(figsize=(8, 8))
+        fig, ax = plt.subplots(figsize=(8, 6))
 
         total_points = len(self.all_points)
+
+        norm = mcolors.Normalize(vmin=-np.pi/6, vmax=np.pi/6)
+        cmap = cm.hsv
 
         for idx in range(total_points):
             region_idx = self.vor.point_region[idx]
@@ -88,14 +94,23 @@ class PerodicVoronoi:
                 continue
 
             x, y = polygon.exterior.xy
-            plt.fill(x, y, alpha=0.5)
+            
+            color = cmap(norm(self.theta[idx % self.N]))
+            ax.fill(x, y, alpha=0.5, color=color)
 
-        plt.scatter(self.points[:, 0], self.points[:, 1], color='red', s=10)
-        plt.xlim(0, self.L)
-        plt.ylim(0, self.L)
-        plt.title(f"Periodic Voronoi Lattice (L={self.L}, rho={self.rho})")
-        plt.xlabel("x")
-        plt.ylabel("y")
-        plt.grid()
+        ax.scatter(self.points[:, 0], self.points[:, 1], color='black', s=10)
+        ax.set_xlim(0, self.L)
+        ax.set_ylim(0, self.L)
+        ax.set_aspect('equal')
+        ax.set_title(rf"Periodic Voronoi Lattice ($L=${self.L}, $\rho=${self.rho})")
+        ax.set_xlabel(r"$x$")
+        ax.set_ylabel(r"$y$")
+        ax.grid()
+        
+        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, ticks=[-np.pi/6, 0, np.pi/6])
+        cbar.set_label(r"$\theta$ (rad)")
+        cbar.set_ticklabels([r"$-\pi/6$", r"$0$", r"$\pi/6$"])
+
         plt.tight_layout()
-        plt.show()
