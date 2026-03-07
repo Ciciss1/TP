@@ -3,7 +3,11 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from numba import njit
 from shapely.geometry import Point, Polygon
-from scipy.spatial import cKDTree, Delaunay
+from scipy.spatial import cKDTree
+from scipy.optimize import minimize
+from collections import defaultdict
+
+import Observables as obs
 
 @njit
 def generate_graphene_lattice(L, a_CC = 1.42):
@@ -67,40 +71,25 @@ class GrapheneCrystal:
     def remove_close_atoms(self, min_dist):
         tree = cKDTree(self.atoms)
         pairs = tree.query_pairs(min_dist)
-        
+
         to_remove = set()
         for i, j in pairs:
-            to_remove.add(j)
+            to_remove.add(i)
 
         mask = np.ones(len(self.atoms), dtype=bool)
         mask[list(to_remove)] = False
         self.atoms = self.atoms[mask]
 
-    def build_graphene_bonds(self, r_min = 1.3, r_max = 2, max_neighbors = 3):
+    def build_graphene_bonds(self, a = 1.42):
         tree = cKDTree(self.atoms)
-        pairs = tree.query_pairs(r_max)
-
-        neighbors = [[] for _ in range(len(self.atoms))]
-        for i, j in pairs:
-            r = np.linalg.norm(self.atoms[i] - self.atoms[j])
-            if r_min < r < r_max:
-                neighbors[i].append((j, r))
-                neighbors[j].append((i, r))
+        pairs = tree.query_pairs(a * 1.1)
 
         self.bonds = []
-        for i in range(len(self.atoms)):
-            if len(neighbors[i]) == 0:
-                continue
-
-            neigh = sorted(neighbors[i], key=lambda x: x[1])[:max_neighbors]
-
-            for j, d in neigh:
-                if i < j:
-                    self.bonds.append((i, j))
-
-        self.bonds = np.array(self.bonds, dtype=np.int32)
-        
-
+        for i, j in pairs:
+            d = np.linalg.norm(self.atoms[i] - self.atoms[j])
+            if d < a * 1.1 and d > a * 0.9:
+                self.bonds.append((i, j))
+    
     def build_polycrystal(self, a = 1.42):
         
         base_lattice = generate_graphene_lattice(3 * self.L / 2, a)
@@ -134,7 +123,7 @@ class GrapheneCrystal:
         mask = (self.atoms[:, 0] >= 0) & (self.atoms[:, 0] <= self.L) & (self.atoms[:, 1] >= 0) & (self.atoms[:, 1] <= self.L)
         self.atoms = self.atoms[mask]
 
-        self.remove_close_atoms(a * 0.9)
+        self.remove_close_atoms(a * 0.8)
         self.build_graphene_bonds()
 
     def plot_atoms(self):
