@@ -57,6 +57,26 @@ def rotate_atoms(atoms, theta):
         rotated_atoms[i, 1] = y_rot
     return rotated_atoms
 
+@njit
+def compute_neighbors(atoms, bonds):
+    N = len(atoms)
+    neighbors = -np.ones((N, 3), dtype=np.int64)
+    for i, j in bonds:
+        if neighbors[i, 0] == -1:
+            neighbors[i, 0] = j
+        elif neighbors[i, 1] == -1:
+            neighbors[i, 1] = j
+        elif neighbors[i, 2] == -1:
+            neighbors[i, 2] = j
+
+        if neighbors[j, 0] == -1:
+            neighbors[j, 0] = i
+        elif neighbors[j, 1] == -1:
+            neighbors[j, 1] = i
+        elif neighbors[j, 2] == -1:
+            neighbors[j, 2] = i
+    return neighbors
+
 class GrapheneCrystal:
     def __init__(self, voronoi, a = 1.42):
         self.lattice = voronoi
@@ -80,7 +100,7 @@ class GrapheneCrystal:
         mask[list(to_remove)] = False
         self.atoms = self.atoms[mask]
 
-    def build_graphene_bonds(self, a = 1.42):
+    def build_graphene_bonds(self, a = 1.42, max_bonds = 3):
         tree = cKDTree(self.atoms)
         pairs = tree.query_pairs(a * 1.1)
 
@@ -89,6 +109,7 @@ class GrapheneCrystal:
             d = np.linalg.norm(self.atoms[i] - self.atoms[j])
             if d < a * 1.1 and d > a * 0.9:
                 self.bonds.append((i, j))
+        self.bonds = np.array(self.bonds)
     
     def build_polycrystal(self, a = 1.42):
         
@@ -125,6 +146,13 @@ class GrapheneCrystal:
 
         self.remove_close_atoms(a * 0.8)
         self.build_graphene_bonds()
+        self.neighbors = compute_neighbors(self.atoms, self.bonds)
+
+    def compute_observables(self):
+        self.psi6 = obs.compute_psi6(self.atoms, self.neighbors)
+
+        bin_bounds = np.linspace(0, self.L / 2, 51)
+        self.G6 = obs.compute_orientational_correlation(self.psi6, self.atoms, bin_bounds)
 
     def plot_atoms(self):
         plt.figure(figsize=(6,6))
