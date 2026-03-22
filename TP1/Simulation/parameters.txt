@@ -1,6 +1,6 @@
 model = "ln"
 L = 128
-T = [0.2]
+T = [0.15,0.18, 0.22, 0.25]
 J = 1.0
 epsilon = 0.0
 gamma = 1.0
@@ -10,4 +10,4 @@ n_therm = 5*10**5
 n_meas = 10**4
 overrelax_interval = 1000
 meas_interval = n_meas // 10
-coeur = 6
+coeur = 4

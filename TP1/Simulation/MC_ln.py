@@ -65,7 +65,7 @@ def energy(theta, neighbors, epsilon, gamma, A, rho):
                 continue
             dtheta = np.abs(wrap_angle(theta[i] - theta[j]))
             H_int += dtheta * (A - np.log(max(1e-10, dtheta)))
-    H_int *= 0.5 * (gamma / (3 * np.sqrt(rho)))
+    H_int *= gamma / (3 * np.sqrt(rho))
     H = H_0 + H_int
     return H
 
