@@ -4,7 +4,6 @@ from matplotlib.collections import LineCollection
 from numba import njit
 from shapely.geometry import Point, Polygon
 from scipy.spatial import cKDTree
-from scipy.optimize import minimize
 from collections import defaultdict
 
 import Observables as obs
@@ -94,7 +93,9 @@ class GrapheneCrystal:
 
         to_remove = set()
         for i, j in pairs:
-            to_remove.add(i)
+            if j in to_remove or i in to_remove:
+                continue
+            to_remove.add(j)
 
         mask = np.ones(len(self.atoms), dtype=bool)
         mask[list(to_remove)] = False
@@ -102,14 +103,101 @@ class GrapheneCrystal:
 
     def build_graphene_bonds(self, a = 1.42, max_bonds = 3):
         tree = cKDTree(self.atoms)
-        pairs = tree.query_pairs(a * 1.1)
+        pairs = tree.query_pairs(a * 1.2)
 
         self.bonds = []
         for i, j in pairs:
             d = np.linalg.norm(self.atoms[i] - self.atoms[j])
-            if d < a * 1.1 and d > a * 0.9:
+            if a * 0.8 <= d <= a * 1.2:
                 self.bonds.append((i, j))
         self.bonds = np.array(self.bonds)
+
+        bond_count = np.zeros(len(self.atoms), dtype=np.int64)
+        for i, j in self.bonds:
+            bond_count[i] += 1
+            bond_count[j] += 1
+        overcoordinated = np.where(bond_count > max_bonds)[0]
+        
+        while len(overcoordinated) > 0:
+            neighbors_dict = defaultdict(list)
+            for i, j in self.bonds:
+                neighbors_dict[i].append(j)
+                neighbors_dict[j].append(i)
+
+            to_remove = set()
+
+            for idx in overcoordinated:
+                if idx in to_remove:
+                    continue
+
+                if bond_count[idx] <= max_bonds:
+                    continue
+                
+                candidates = [idx] + neighbors_dict[idx]
+                worst = max(candidates, key=lambda x: bond_count[x])
+                to_remove.add(worst)
+
+                bond_count[worst] = 0
+                for neighbor in neighbors_dict[worst]:
+                    bond_count[neighbor] -= 1
+                
+            mask = np.ones(len(self.atoms), dtype=bool)
+            mask[list(to_remove)] = False
+            self.atoms = self.atoms[mask]
+
+            new_index = np.full(len(mask), -1, dtype=np.int64)
+            new_index[mask] = np.arange(np.sum(mask))
+
+            new_bonds = []
+            for i, j in self.bonds:
+                if mask[i] and mask[j]:
+                    new_bonds.append((new_index[i], new_index[j]))
+
+            self.bonds = np.array(new_bonds)
+
+            bond_count = np.zeros(len(self.atoms), dtype=np.int64)
+            for i, j in self.bonds:
+                bond_count[i] += 1
+                bond_count[j] += 1
+            overcoordinated = np.where(bond_count > max_bonds)[0]
+        
+        bond_count = np.zeros(len(self.atoms), dtype=np.int64)
+        for i, j in self.bonds:
+            bond_count[i] += 1
+            bond_count[j] += 1
+        undercoordinated = np.where(bond_count < max_bonds)[0]
+        max_bond_length = a * 1.7
+
+        tree = cKDTree(self.atoms)
+        bonds_set = set(tuple(sorted((i, j))) for i, j in self.bonds)
+        new_bonds = list(self.bonds)
+
+        while len(undercoordinated) > 0:
+            made_any = False
+            for idx in undercoordinated:
+                if bond_count[idx] >= max_bonds:
+                    continue
+
+                neighbors = tree.query_ball_point(self.atoms[idx], max_bond_length)
+                neighbors = [n for n in neighbors if n != idx and bond_count[n] < max_bonds and tuple(sorted((idx, n))) not in bonds_set]
+                if not neighbors:
+                    continue
+
+                nearest = min(neighbors, key=lambda n: np.linalg.norm(self.atoms[idx] - self.atoms[n]))
+
+                bond_key = tuple(sorted((idx, nearest)))
+                bonds_set.add(bond_key)
+                new_bonds.append(bond_key)
+                bond_count[idx] += 1
+                bond_count[nearest] += 1
+                made_any = True
+
+            if not made_any:
+                break
+
+            undercoordinated = np.where(bond_count < max_bonds)[0]
+
+        self.bonds = np.array(new_bonds)
     
     def build_polycrystal(self, a = 1.42):
         
@@ -125,7 +213,7 @@ class GrapheneCrystal:
             if -1 in vertices or len(vertices) == 0:
                 continue
 
-            polygon = Polygon(self.vor.vertices[vertices]).buffer(a * 0.2)
+            polygon = Polygon(self.vor.vertices[vertices]).buffer(a * 0.8)
 
             theta = self.theta[grain % self.N]
             rot_atoms = rotate_atoms(base_lattice, theta)
@@ -143,7 +231,7 @@ class GrapheneCrystal:
 
         mask = (self.atoms[:, 0] >= 0) & (self.atoms[:, 0] <= self.L) & (self.atoms[:, 1] >= 0) & (self.atoms[:, 1] <= self.L)
         self.atoms = self.atoms[mask]
-
+        
         self.remove_close_atoms(a * 0.8)
         self.build_graphene_bonds()
         self.neighbors = compute_neighbors(self.atoms, self.bonds)
