@@ -64,13 +64,13 @@ class LammpsWriter:
         Lz = self.Z_THICKNESS
 
         with open(path, 'w') as f:
-            f.write(f"{filename}\n\n")
-            f.write(f"{N} atoms \n 1 atom types\n\n")
-            f.write(f"0.0 {Lx} xlo xhi\n")
-            f.write(f"0.0 {Ly} ylo yhi\n")
-            f.write(f"0.0 {Lz} zlo zhi\n\n")
+            f.write(f"LAMMPS data file\n\n")
+            f.write(f"{N} atoms \n1 atom types\n\n")
+            f.write(f"-{Lx/2:.6f} {Lx/2:.6f} xlo xhi\n")
+            f.write(f"-{Ly/2:.6f} {Ly/2:.6f} ylo yhi\n")
+            f.write(f"-{Lz/2:.6f} {Lz/2:.6f} zlo zhi\n\n")
             f.write("Masses\n\n1 12.0107\n\n")
-            f.write("Atoms\n\n")
+            f.write("Atoms # atomic\n\n")
             for i, (x, y) in enumerate(self.atoms):
                 f.write(f"{i+1} 1 {x - Lx/2:.6f} {y - Ly/2:.6f} 0.0\n")
 
@@ -165,6 +165,8 @@ class LammpsWriter:
             # ---AIREBO potential---
             f.write("pair_style airebo 3.0\n")
             f.write("pair_coeff * * CH.airebo C\n\n")
+            # f.write("pair_style lj/cut 2.5\n")
+            # f.write("pair_coeff * * 1.0 1.0 2.5\n\n")
 
             # ---dump---
             f.write(f"dump DDump all atom {dump_every} {basename}_3d.lammpstrj\n")
@@ -186,34 +188,3 @@ class LammpsWriter:
 
             # ---3: minimize final structure---
             f.write(f"minimize 1.0e-8 0 {n_min} 1000000\n\n")
-
-    def setup_dir(self, filename):
-        d = os.path.dirname(filename)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        os.system(f"cp CH.airebo {d}/")
-
-    def read_energy(self, output_filename):
-        with open(output_filename) as f:
-            lines = f.readlines()
-        for line in reversed(lines):
-            if "Energy" in line:
-                try:
-                    return float(line.split()[-1])
-                except ValueError:
-                    pass
-        return None
-    
-    def read_final_coords(self, traj_filename):
-        with open(traj_filename) as f:
-            lines = f.readlines()
-
-        xyz = []
-        i = -1
-        while "ITEM" not in lines[i]:
-            parts = lines[i].split()
-            if len(parts) >= 5:
-                xyz.append([float(parts[2]), float(parts[3])])
-            i -= 1
-
-        self.atoms = np.array(xyz[::-1])
