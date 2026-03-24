@@ -7,6 +7,7 @@ from scipy.spatial import cKDTree
 from collections import defaultdict
 
 import Observables as obs
+from Voronoi import PeriodicVoronoi
 
 @njit
 def generate_graphene_lattice(L, a_CC = 1.42):
@@ -77,7 +78,7 @@ def compute_neighbors(atoms, bonds):
     return neighbors
 
 class GrapheneCrystal:
-    def __init__(self, voronoi, a = 1.42):
+    def __init__(self, voronoi: PeriodicVoronoi, a = 1.42):
         self.lattice = voronoi
         self.vor = voronoi.vor
         self.L = voronoi.L

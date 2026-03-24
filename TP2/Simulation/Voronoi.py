@@ -46,6 +46,9 @@ class PeriodicVoronoi:
         adj_j = []
         adj_length = []
 
+        v1_list = []
+        v2_list = []
+
         start = 4 * self.N
         end = 5 * self.N
 
@@ -67,10 +70,14 @@ class PeriodicVoronoi:
                 adj_i.append(i)
                 adj_j.append(j)
                 adj_length.append(length)
-                
+                v1_list.append(v1)
+                v2_list.append(v2)
+
         self.adj_i = np.array(adj_i, dtype=np.int32)
         self.adj_j = np.array(adj_j, dtype=np.int32)
         self.adj_length = np.array(adj_length, dtype=np.float64)
+        self.ridge_v1 = np.array(v1_list, dtype=np.float64)
+        self.ridge_v2 = np.array(v2_list, dtype=np.float64)
 
     def plot(self):
 
