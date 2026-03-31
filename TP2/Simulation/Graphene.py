@@ -1,4 +1,6 @@
 import numpy as np
+import sys
+sys.path.insert(0, "TP2/Simulation")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from numba import njit
@@ -76,6 +78,27 @@ def compute_neighbors(atoms, bonds):
         elif neighbors[j, 2] == -1:
             neighbors[j, 2] = i
     return neighbors
+
+def load_crystal(path):
+    data = np.load(path)
+    
+    L = float(data['L'][0])
+    rho = float(data['rho'][0])
+    points = data['points']
+    theta = data['theta']
+
+    vor = PeriodicVoronoi(L, rho)
+    vor.points = points
+    vor.theta = theta
+    vor.N = len(points)
+    vor.build_periodic_voronoi()
+    vor.get_adjacency()
+
+    crystal = GrapheneCrystal(vor)
+    crystal.atoms = data['atoms']
+    crystal.bonds = data['bonds']
+
+    return crystal
 
 class GrapheneCrystal:
     def __init__(self, voronoi: PeriodicVoronoi, a = 1.42):
@@ -266,3 +289,14 @@ class GrapheneCrystal:
         plt.xlabel(r"$x$")
         plt.ylabel(r"$y$")
         plt.tight_layout()
+
+    def save_crystal(self, path):
+        np.savez(
+            path,
+            bonds = self.bonds,
+            atoms = self.atoms,
+            points = self.points,
+            theta = self.theta,
+            L = np.array([self.L]),
+            rho = np.array([self.lattice.rho]),
+        )

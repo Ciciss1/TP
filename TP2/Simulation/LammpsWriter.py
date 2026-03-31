@@ -97,8 +97,8 @@ class LammpsWriter:
             f.write("units metal\n")
             f.write("dimension 2\n")
             f.write("atom_style atomic\n")
+            f.write("newton on\n")
             f.write("boundary p p p\n")
-            f.write("newton on\n\n")
 
             f.write(f"read_data {basename}.coord\n\n")
 

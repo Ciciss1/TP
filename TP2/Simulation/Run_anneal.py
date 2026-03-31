@@ -1,6 +1,5 @@
 import os
 import shutil
-import argparse
 import subprocess
 import numpy as np
 import sys
@@ -8,10 +7,15 @@ from tqdm import tqdm
 
 sys.path.insert(0, "TP2/Simulation")
 from Voronoi import PeriodicVoronoi
-from Graphene import GrapheneCrystal
+from Graphene import GrapheneCrystal, load_crystal
 from LammpsWriter import LammpsWriter
 
-LAMMPS_CMD_GPU = "lmp -sf gpu -pk gpu 1"
+LAMMPS_CMD_KOKKOS = (
+    "/home/alexi/lammps/build-kokkos/lmp"
+    " -k on g 1 t 1"
+    " -sf kk"
+    " -pk kokkos neigh half"
+)
 
 def lammps_run(lammps_cmd, inp_file, out_file, cwd):
     cmd = lammps_cmd.split() + ["-in", inp_file]
@@ -48,8 +52,6 @@ def read_final_coords(traj_path):
     return np.array(xyz[::-1])
 
 def run_anneal(
-        L = 200,
-        rho = 0.0005,
         unfreeze_dist = 1.5,
         T_start = 16500,
         T_end = 100,
@@ -60,7 +62,7 @@ def run_anneal(
         n_quench = 500,
         n_iter = 2,
         out_dir = "results",
-        lammps_cmd = LAMMPS_CMD_GPU,
+        lammps_cmd = LAMMPS_CMD_KOKKOS,
         a = 1.42,
 ):
     out_dir = os.path.abspath(out_dir)
@@ -72,10 +74,7 @@ def run_anneal(
     else:
         raise FileNotFoundError("CH.airebo not found")
     
-    print(f"Generating Graphene PolyCrystal : L = {L}, rho = {rho}")
-    vor = PeriodicVoronoi(L, rho)
-    graphene = GrapheneCrystal(vor, a=a)
-    print(f"{len(graphene.atoms)} atoms generated.")
+    graphene = load_crystal(os.path.join(out_dir, "initial_crystal.npz"))
 
     writer = LammpsWriter(graphene, unfreeze_dist=unfreeze_dist)
     n_unfreeze = writer.unfreeze_mask.sum()
@@ -85,14 +84,15 @@ def run_anneal(
     energies = []
 
     for i in tqdm(range(n_iter), desc="Annealing iterations"):
-        name = os.path.join(out_dir, f"sim_iter_{i}_2d")
-        basename = os.path.basename(name)
-        inp_path = os.path.join(out_dir, f"{basename}_2d.inp")
-        out_path = os.path.join(out_dir, f"{basename}_2d.out")
+        name_2d = os.path.join(out_dir, f"sim_iter_{i}_2d")
+        basename_2d = os.path.basename(name_2d)
+        inp_path = os.path.join(out_dir, f"{basename_2d}_2d.inp")
+        out_path = os.path.join(out_dir, f"{basename_2d}_2d.out")
+        trj_2d = os.path.join(out_dir, f"{basename_2d}.lammpstrj")
 
-        writer.write(name)
+        writer.write(name_2d)
         writer.write_input_2d(
-            name,
+            name_2d,
             T_start = T_start,
             T_end = T_end,
             n_anneal = n_anneal,
@@ -104,20 +104,19 @@ def run_anneal(
             
         lammps_run(lammps_cmd, inp_path, out_path, cwd = out_dir)
         
-        trj = f"{name}.lammpstrj"
-        if os.path.exists(trj):
-            writer.atoms = read_final_coords(trj)
+        if os.path.exists(trj_2d):
+            writer.atoms = read_final_coords(trj_2d)
         else:
-            raise FileNotFoundError(f"Trajectory file {trj} not found after 2D anneal.")
+            raise FileNotFoundError(f"Trajectory file {trj_2d} not found after 2D anneal.")
         
-        name = os.path.join(out_dir, f"sim_iter_{i}_3d")
-        basename = os.path.basename(name)
-        inp_path_3d = os.path.join(out_dir, f"{basename}_3d.inp")
-        out_path_3d = os.path.join(out_dir, f"{basename}_3d.out")
+        name_3d = os.path.join(out_dir, f"sim_iter_{i}_3d")
+        basename_3d = os.path.basename(name_3d)
+        inp_path_3d = os.path.join(out_dir, f"{basename_3d}_3d.inp")
+        out_path_3d = os.path.join(out_dir, f"{basename_3d}_3d.out")
         
-        writer.write(name)
+        writer.write(name_3d)
         writer.write_input_3d(
-            name,
+            name_3d,
             T_quench = T_end,
             n_quench = n_quench,
             n_min = n_min,
@@ -128,14 +127,18 @@ def run_anneal(
         
         lammps_run(lammps_cmd, inp_path_3d, out_path_3d, cwd = out_dir)
 
-        E = read_energy(f"{name}_3d.out")
+        E = read_energy(f"{name_3d}_3d.out")
         energies.append(E)
 
     E_vals = [e for e in energies if e is not None]
     E_mean = np.mean(E_vals) if E_vals else None
     print(f"Mean Energy over {n_iter} iterations: {E_mean}")
-    np.save(os.path.join(out_dir, "final_atoms.npy"), writer.atoms)
-    return writer.atoms, energies
+
+    graphene.atoms = writer.atoms
+    graphene.atoms += writer.L / 2
+    graphene.build_graphene_bonds()
+
+    graphene.save_crystal(os.path.join(out_dir, "final_crystal.npz"))
 
 if __name__ == "__main__":
     params = {}
@@ -143,8 +146,6 @@ if __name__ == "__main__":
         exec(f.read(), {}, params)
 
     run_anneal(
-        L=params.get("L"),
-        rho=params.get("rho"),
         unfreeze_dist=params.get("unfreeze_dist"),
         T_start=params.get("T_start"),
         T_end=params.get("T_end"),
