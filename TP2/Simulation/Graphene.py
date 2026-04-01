@@ -1,6 +1,7 @@
-import numpy as np
 import sys
 sys.path.insert(0, "TP2/Simulation")
+import os
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from numba import njit
@@ -97,6 +98,7 @@ def load_crystal(path):
     crystal = GrapheneCrystal(vor)
     crystal.atoms = data['atoms']
     crystal.bonds = data['bonds']
+    crystal.neighbors = compute_neighbors(crystal.atoms, crystal.bonds)
 
     return crystal
 
@@ -291,6 +293,8 @@ class GrapheneCrystal:
         plt.tight_layout()
 
     def save_crystal(self, path):
+        if not os.path.exists(os.path.dirname(path)):
+            os.makedirs(os.path.dirname(path))
         np.savez(
             path,
             bonds = self.bonds,

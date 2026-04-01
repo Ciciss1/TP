@@ -24,7 +24,7 @@ def bin_index(r, bin_bounds):
         return -1
     k = lower_bound(bin_bounds, r)
     return k - 1
-    
+
 @njit
 def compute_psi6(atoms, neighbors):
     '''
