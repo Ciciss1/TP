@@ -127,7 +127,7 @@ class GrapheneCrystal:
         mask[list(to_remove)] = False
         self.atoms = self.atoms[mask]
 
-    def build_graphene_bonds(self, a = 1.42, max_bonds = 3):
+    def build_graphene_bonds(self, a = 1.42, max_bonds = 4):
         tree = cKDTree(self.atoms)
         pairs = tree.query_pairs(a * 1.2)
 
