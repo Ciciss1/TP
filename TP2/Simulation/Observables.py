@@ -1,6 +1,13 @@
 import numpy as np
 from numba import njit
 
+GPa_Angstrom_to_eV_Angstrom2 = 0.00624150907
+GRAPHENE_THICKNESS = 3.35
+MU_GRAPHENE = 436e9 * 1e-30 * 6.242e18
+NU_GRAPHENE = 0.206
+B_10_GRAPHENE = np.sqrt(3) * 1.42
+R0_GRAPHENE = 1.2
+
 @njit
 def lower_bound(arr, x):
     '''
@@ -24,7 +31,7 @@ def bin_index(r, bin_bounds):
         return -1
     k = lower_bound(bin_bounds, r)
     return k - 1
-    
+
 @njit
 def compute_psi6(atoms, neighbors):
     '''
@@ -74,3 +81,10 @@ def compute_orientational_correlation(psi6, coords, bin_bounds):
         if count[b] > 0:
             G6[b] /= count[b]
     return G6
+
+@njit
+def read_shockley_energy(theta, mu, nu, b, r0):
+    '''
+    Compute the Shockley energy of a dislocation with Burgers vector b and core radius r0
+    '''
+    
