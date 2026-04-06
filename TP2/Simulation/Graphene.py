@@ -16,6 +16,11 @@ from Voronoi import PeriodicVoronoi
 def generate_graphene_lattice(L, a_CC = 1.42):
     '''
     Generate a graphene lattice with lattice constant a
+    Inputs:
+        L : size of the box
+        a_CC : carbon-carbon bond length
+    Outputs:
+        atoms : coordinates of the atoms in the graphene lattice
     '''
     a = a_CC * np.sqrt(3)
 
@@ -44,9 +49,15 @@ def generate_graphene_lattice(L, a_CC = 1.42):
     return atoms
 
 @njit
-def rotate_atoms(atoms, theta):
+def rotate_and_move_atoms(atoms, theta, center):
     '''
-    Rotate atoms in each grain by the corresponding angle in theta
+    Rotate atoms in each grain by the corresponding angle in theta and move them to the center of the grain
+    Inputs:
+        atoms : coordinates of the atoms in the graphene lattice
+        theta : orientation of the grain
+        center : center of the grain
+    Outputs:
+        rotated_atoms : coordinates of the rotated and moved atoms
     '''
     rotated_atoms = np.empty_like(atoms)
     c, s = np.cos(theta), np.sin(theta)
@@ -56,12 +67,20 @@ def rotate_atoms(atoms, theta):
 
         x_rot = c * dx - s * dy
         y_rot = s * dx + c * dy
-        rotated_atoms[i, 0] = x_rot
-        rotated_atoms[i, 1] = y_rot
+        rotated_atoms[i, 0] = x_rot + center[0]
+        rotated_atoms[i, 1] = y_rot + center[1]
     return rotated_atoms
 
 @njit
 def compute_neighbors(atoms, bonds):
+    '''
+    Compute the 3 nearest neighbors for each atom based on the bonds
+    Inputs:
+        atoms : coordinates of the atoms
+        bonds : list of bonds between atoms
+    Outputs:
+        neighbors : list of nearest neighbors for each atom
+    '''
     N = len(atoms)
     neighbors = -np.ones((N, 3), dtype=np.int64)
     for i, j in bonds:
@@ -103,6 +122,20 @@ def load_crystal(path):
     return crystal
 
 class GrapheneCrystal:
+    '''
+    Create a polycrystalline graphene structure based on the Voronoi diagram
+    Attributes:
+        lattice : Voronoi lattice
+        vor : Voronoi diagram
+        L : size of the box
+        N : number of grains
+        points : coordinates of the grain centers
+        all_points : coordinates of all grain centers (including images)
+        theta : orientation of the grains
+        atoms : coordinates of the atoms
+        bonds : list of bonds between atoms
+        neighbors : list of nearest neighbors for each atom
+    '''
     def __init__(self, voronoi: PeriodicVoronoi, a = 1.42):
         self.lattice = voronoi
         self.vor = voronoi.vor
@@ -114,6 +147,11 @@ class GrapheneCrystal:
         self.build_polycrystal(a)
 
     def remove_close_atoms(self, min_dist):
+        '''
+        Remove atoms that are closer than min_dist to each other
+        Inputs:
+            min_dist : minimum distance between atoms
+        '''
         tree = cKDTree(self.atoms)
         pairs = tree.query_pairs(min_dist)
 
@@ -127,7 +165,13 @@ class GrapheneCrystal:
         mask[list(to_remove)] = False
         self.atoms = self.atoms[mask]
 
-    def build_graphene_bonds(self, a = 1.42, max_bonds = 4):
+    def build_graphene_bonds(self, a = 1.42, max_bonds = 3):
+        '''
+        Build the bonds between atoms based on their distances and ensure that each atom has at most 3 bonds
+        Inputs:
+            a : carbon-carbon bond length
+            max_bonds : maximum number of bonds per atom
+        '''
         tree = cKDTree(self.atoms)
         pairs = tree.query_pairs(a * 1.2)
 
@@ -226,6 +270,11 @@ class GrapheneCrystal:
         self.bonds = np.array(new_bonds)
     
     def build_polycrystal(self, a = 1.42):
+        '''
+        Build the polycrystalline graphene structure
+        Inputs:
+            a : carbon-carbon bond length
+        '''
         
         base_lattice = generate_graphene_lattice(3 * self.L / 2, a)
         base_lattice += np.array([self.L, self.L])
@@ -242,7 +291,8 @@ class GrapheneCrystal:
             polygon = Polygon(self.vor.vertices[vertices]).buffer(a * 0.8)
 
             theta = self.theta[grain % self.N]
-            rot_atoms = rotate_atoms(base_lattice, theta)
+            center = self.all_points[grain]
+            rot_atoms = rotate_and_move_atoms(base_lattice, theta, center)
 
             min_x, min_y, max_x, max_y = polygon.bounds
             mask = (rot_atoms[:, 0] >= min_x) & (rot_atoms[:, 0] <= max_x) & (rot_atoms[:, 1] >= min_y) & (rot_atoms[:, 1] <= max_y)
@@ -263,6 +313,9 @@ class GrapheneCrystal:
         self.neighbors = compute_neighbors(self.atoms, self.bonds)
 
     def compute_observables(self):
+        '''
+        Compute the observables for the graphene crystal
+        '''
         self.psi6 = obs.compute_psi6(self.atoms, self.neighbors)
 
         bin_bounds = np.linspace(0, self.L / 2, 51)
