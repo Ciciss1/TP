@@ -59,16 +59,17 @@ def rotate_and_move_atoms(atoms, theta, center):
     Outputs:
         rotated_atoms : coordinates of the rotated and moved atoms
     '''
-    rotated_atoms = np.empty_like(atoms)
+    moved_atoms = atoms + center
+    rotated_atoms = np.empty_like(moved_atoms)
     c, s = np.cos(theta), np.sin(theta)
-    for i in range(len(atoms)):
-        dx = atoms[i, 0]
-        dy = atoms[i, 1]
+    for i in range(len(moved_atoms)):
+        dx = moved_atoms[i, 0]
+        dy = moved_atoms[i, 1]
 
         x_rot = c * dx - s * dy
         y_rot = s * dx + c * dy
-        rotated_atoms[i, 0] = x_rot + center[0]
-        rotated_atoms[i, 1] = y_rot + center[1]
+        rotated_atoms[i, 0] = x_rot
+        rotated_atoms[i, 1] = y_rot
     return rotated_atoms
 
 @njit
@@ -277,7 +278,7 @@ class GrapheneCrystal:
         '''
         
         base_lattice = generate_graphene_lattice(3 * self.L / 2, a)
-        base_lattice += np.array([self.L, self.L])
+        base_lattice += np.array([self.L / 2, self.L / 2])
 
         all_atoms = []
 
@@ -312,14 +313,28 @@ class GrapheneCrystal:
         self.build_graphene_bonds()
         self.neighbors = compute_neighbors(self.atoms, self.bonds)
 
+        del self.vor
+        del self.all_points
+
+    def compute_grain_mask(self):
+        '''
+        Compute a mask indicating which grain each atom belongs to
+        '''
+        tree = cKDTree(self.points)
+        _, grain_mask = tree.query(self.atoms)
+        return grain_mask.astype(np.int32)
+
     def compute_observables(self):
         '''
         Compute the observables for the graphene crystal
         '''
-        self.psi6 = obs.compute_psi6(self.atoms, self.neighbors)
-
         bin_bounds = np.linspace(0, self.L / 2, 51)
-        self.G6 = obs.compute_orientational_correlation(self.psi6, self.atoms, bin_bounds)
+        grain_mask = self.compute_grain_mask()
+
+        psi6 = obs.compute_psi6(self.atoms, self.neighbors)
+        G6 = obs.compute_orientational_correlation(psi6, self.atoms, bin_bounds)
+        CG = obs.compute_translationnal_correlation_total(self.atoms, grain_mask, bin_bounds)
+        return bin_bounds, G6, CG
 
     def plot_atoms(self):
         plt.figure(figsize=(6,6))
