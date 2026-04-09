@@ -6,8 +6,7 @@ import sys
 from tqdm import tqdm
 
 sys.path.insert(0, "TP2/Simulation")
-from Voronoi import PeriodicVoronoi
-from Graphene import GrapheneCrystal, load_crystal
+from Graphene import load_crystal
 from LammpsWriter import LammpsWriter
 
 LAMMPS_CMD_KOKKOS = (
@@ -41,15 +40,26 @@ def read_final_coords(traj_path):
     with open(traj_path) as f:
         lines = f.readlines()
 
+    least_atoms_line = -1
+    for idx, line in enumerate(lines):
+        if line.startswith("ITEM: ATOMS"):
+            least_atoms_line = idx
+
+    if least_atoms_line < 0:
+        raise ValueError("No ATOMS section found in trajectory file")
+    
     xyz = []
-    i = -1
-    while "ITEM" not in lines[i]:
-        parts = lines[i].split()
+    for line in lines[least_atoms_line + 1:]:
+        if line.startswith("ITEM:"):
+            break
+        parts = line.split()
         if len(parts) >= 5:
             xyz.append([float(parts[2]), float(parts[3])])
-        i -= 1
 
-    return np.array(xyz[::-1])
+    if not xyz:
+        raise ValueError("No atom coordinates found in trajectory file")
+
+    return np.array(xyz)
 
 def run_anneal(
         unfreeze_dist = 1.5,
@@ -86,8 +96,8 @@ def run_anneal(
     for i in tqdm(range(n_iter), desc="Annealing iterations"):
         name_2d = os.path.join(out_dir, f"sim_iter_{i}_2d")
         basename_2d = os.path.basename(name_2d)
-        inp_path = os.path.join(out_dir, f"{basename_2d}_2d.inp")
-        out_path = os.path.join(out_dir, f"{basename_2d}_2d.out")
+        inp_path_2d = os.path.join(out_dir, f"{basename_2d}_2d.inp")
+        out_path_2d = os.path.join(out_dir, f"{basename_2d}_2d.out")
         trj_2d = os.path.join(out_dir, f"{basename_2d}.lammpstrj")
 
         writer.write(name_2d)
@@ -102,7 +112,7 @@ def run_anneal(
             seed = None
         )
             
-        lammps_run(lammps_cmd, inp_path, out_path, cwd = out_dir)
+        lammps_run(lammps_cmd, inp_path_2d, out_path_2d, cwd = out_dir)
         
         if os.path.exists(trj_2d):
             writer.atoms = read_final_coords(trj_2d)
@@ -127,33 +137,14 @@ def run_anneal(
         
         lammps_run(lammps_cmd, inp_path_3d, out_path_3d, cwd = out_dir)
 
-        E = read_energy(f"{name_3d}_3d.out")
+        E = read_energy(out_path_3d)
         energies.append(E)
 
     E_vals = [e for e in energies if e is not None]
-    E_mean = np.mean(E_vals) if E_vals else None
+    E_mean = float(np.mean(E_vals)) if E_vals else None
     print(f"Mean Energy over {n_iter} iterations: {E_mean}")
 
-    graphene.atoms = writer.atoms
-    graphene.atoms += writer.L / 2
+    graphene.atoms = writer.atoms + writer.L / 2
     graphene.build_graphene_bonds()
 
     graphene.save_crystal(os.path.join(out_dir, "final_crystal.npz"))
-
-if __name__ == "__main__":
-    params = {}
-    with open("parameters.txt") as f:
-        exec(f.read(), {}, params)
-
-    run_anneal(
-        unfreeze_dist=params.get("unfreeze_dist"),
-        T_start=params.get("T_start"),
-        T_end=params.get("T_end"),
-        n_anneal=params.get("n_anneal"),
-        n_min=params.get("n_min"),
-        damping=params.get("damping"),
-        dump_every=params.get("dump_every"),
-        n_quench=params.get("n_quench"),
-        n_iter=params.get("n_iter"),
-        out_dir=params.get("out_dir"),
-    )

@@ -76,6 +76,8 @@ def compute_orientational_correlation(psi6, coords, bin_bounds):
     '''
     N = len(psi6)
     num_bins = len(bin_bounds) - 1
+    r_max = bin_bounds[num_bins]
+
     G6 = np.zeros(num_bins, dtype=np.float64)
     count = np.zeros(num_bins, dtype=np.int64)
 
@@ -87,6 +89,10 @@ def compute_orientational_correlation(psi6, coords, bin_bounds):
             dx = xi - coords[j, 0]
             dy = yi - coords[j, 1]
             r = np.sqrt(dx * dx + dy * dy)
+
+            if r >= r_max:
+                continue
+
             b = bin_index(r, bin_bounds)
             if b < 0:
                 continue
@@ -98,7 +104,6 @@ def compute_orientational_correlation(psi6, coords, bin_bounds):
             G6[b] /= count[b]
     return G6
 
-@njit
 def compute_Sq_grid(x, y, qx_vals, qy_vals, q_min = 0.5):
     '''
     Compute S(q) on a grid
@@ -113,37 +118,23 @@ def compute_Sq_grid(x, y, qx_vals, qy_vals, q_min = 0.5):
         best_qy : qy value that maximizes S(q)
     '''
     N = len(x)
-    n_qx = len(qx_vals)
-    n_qy = len(qy_vals)
+    phase_x = np.exp(1j * np.outer(qx_vals, x))
+    phase_y = np.exp(1j * np.outer(qy_vals, y))
 
-    best_Sq = -1.0
-    best_qx = 0.0
-    best_qy = 0.0
+    fx = np.sum(phase_x, axis=1)
+    fy = np.sum(phase_y, axis=1)
 
-    for i in range(n_qx):
-        qx = qx_vals[i]
-        for j in range(n_qy):
-            qy = qy_vals[j]
-            
-            if qx * qx + qy * qy < q_min * q_min:
-                continue
+    Sq_complex = phase_x @ phase_y.T
+    Sq = (Sq_complex.real ** 2 + Sq_complex.imag ** 2) / N
 
-            re = 0.0
-            im = 0.0
+    QX, QY = np.meshgrid(qx_vals, qy_vals, indexing='ij')
+    mask = (QX ** 2 + QY ** 2) < q_min ** 2
+    Sq[mask] = -1.0
 
-            for k in range(N):
-                phi = qx * x[k] + qy * y[k]
-                re += np.cos(phi)
-                im += np.sin(phi)
+    idx = np.argmax(Sq)
+    i_best, j_best = np.unravel_index(idx, Sq.shape)
 
-            Sq = (re * re + im * im) / N
-
-            if Sq > best_Sq:
-                best_Sq = Sq
-                best_qx = qx
-                best_qy = qy
-
-    return best_qx, best_qy
+    return float(qx_vals[i_best]), float(qy_vals[j_best])
 
 @njit
 def compute_translationnal_correlation_grain(coords, bin_bounds, G):
@@ -158,6 +149,8 @@ def compute_translationnal_correlation_grain(coords, bin_bounds, G):
     '''
     N = len(coords)
     num_bins = len(bin_bounds) - 1
+    r_max = bin_bounds[num_bins]
+
     CG = np.zeros(num_bins, dtype=np.float64)
     count = np.zeros(num_bins, dtype=np.int64)
 
@@ -172,6 +165,10 @@ def compute_translationnal_correlation_grain(coords, bin_bounds, G):
             dx = xi - coords[j, 0]
             dy = yi - coords[j, 1]
             r = np.sqrt(dx * dx + dy * dy)
+
+            if r >= r_max:
+                continue
+
             b = bin_index(r, bin_bounds)
             if b < 0:
                 continue
@@ -203,7 +200,6 @@ def compute_translationnal_correlation_total(atoms, grain_mask, bin_bounds, n_q 
     '''
     qx_vals = np.linspace(-q_max, q_max, n_q)
     qy_vals = np.linspace(-q_max, q_max, n_q)
-    n_bins = len(bin_bounds) - 1
 
     grain_ids = np.unique(grain_mask)
     grain_ids = grain_ids[grain_ids >= 0]

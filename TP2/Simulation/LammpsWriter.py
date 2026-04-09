@@ -6,6 +6,9 @@ from Graphene import GrapheneCrystal
 
 @njit
 def dist_point_segments(px, py, ax, ay, bx, by):
+    '''
+    Perpendicular distance from point (px, py) to segment to segment (ax, ay) - (bx, by)
+    '''
     abx = bx - ax
     aby = by - ay
     ab2 = abx * abx + aby * aby
@@ -22,6 +25,9 @@ def dist_point_segments(px, py, ax, ay, bx, by):
 
 @njit
 def find_gb_atoms(atoms, ridge_v1, ridge_v2, unfreeze_dist):
+    '''
+    Find atoms within unfreeze_dist of any Voronoi ridge
+    '''
     N_atoms = atoms.shape[0]
     N_ridges = ridge_v1.shape[0]
 
@@ -63,6 +69,8 @@ class LammpsWriter:
         Ly = self.L
         Lz = self.Z_THICKNESS
 
+        xy = self.atoms - np.array([Lx/2, Ly/2])
+
         with open(path, 'w') as f:
             f.write(f"LAMMPS data file\n\n")
             f.write(f"{N} atoms \n1 atom types\n\n")
@@ -71,8 +79,9 @@ class LammpsWriter:
             f.write(f"-{Lz/2:.6f} {Lz/2:.6f} zlo zhi\n\n")
             f.write("Masses\n\n1 12.0107\n\n")
             f.write("Atoms # atomic\n\n")
-            for i, (x, y) in enumerate(self.atoms):
-                f.write(f"{i+1} 1 {x - Lx/2:.6f} {y - Ly/2:.6f} 0.0\n")
+            
+            lines = [f"{i+1} 1 {xy[i, 0]:.6f} {xy[i, 1]:.6f} 0.0\n" for i in range(N)]
+            f.writelines(lines)
 
     def write_input_2d(self, filename,
                        T_start = 16500,
@@ -117,8 +126,9 @@ class LammpsWriter:
             f.write("thermo 100\n\n")
 
             # ---groups freeze / unfreeze---
-            f.write(f"group {freeze_group} id " + " ".join(map(str, self.freeze_ids)) + "\n")
-            f.write(f"group {unfreeze_group} id " + " ".join(map(str, self.unfreeze_ids)) + "\n\n")
+            unfreeze_ids_str = " ".join(map(str, self.unfreeze_ids))
+            f.write(f"group {unfreeze_group} id {unfreeze_ids_str}\n")
+            f.write(f"group {freeze_group} subtract all {unfreeze_group}\n\n")
 
             # ---freeze far atoms---
             f.write(f"fix zeroforce {freeze_group} setforce 0 0 0\n")
@@ -165,8 +175,6 @@ class LammpsWriter:
             # ---AIREBO potential---
             f.write("pair_style airebo 3.0\n")
             f.write("pair_coeff * * CH.airebo C\n\n")
-            # f.write("pair_style lj/cut 2.5\n")
-            # f.write("pair_coeff * * 1.0 1.0 2.5\n\n")
 
             # ---dump---
             f.write(f"dump DDump all atom {dump_every} {basename}_3d.lammpstrj\n")

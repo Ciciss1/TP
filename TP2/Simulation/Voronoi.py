@@ -47,7 +47,7 @@ def pick_substrate_points(substrate_coords, N, L):
     if N > M:
         raise ValueError(f"Requested {N} points but only {M} are available.")
     
-    chosen_indices = [np.random.random_integers(0, M - 1)]
+    chosen_indices = [np.random.randint(0, M)]
 
     for _ in range(N - 1):
         chosen_pts = substrate_coords[chosen_indices]
@@ -80,7 +80,7 @@ class PeriodicVoronoi:
         '''
         self.L = L
         self.rho = rho
-        self.N = int(L**2 * rho)
+        self.N = max(1, int(rho * L * L))
 
         self.points = pick_substrate_points(np.array(generate_square_substrate(L)), self.N, L)
                

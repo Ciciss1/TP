@@ -59,18 +59,15 @@ def rotate_and_move_atoms(atoms, theta, center):
     Outputs:
         rotated_atoms : coordinates of the rotated and moved atoms
     '''
-    moved_atoms = atoms + center
-    rotated_atoms = np.empty_like(moved_atoms)
     c, s = np.cos(theta), np.sin(theta)
-    for i in range(len(moved_atoms)):
-        dx = moved_atoms[i, 0]
-        dy = moved_atoms[i, 1]
+    rotated = np.empty_like(atoms)
 
-        x_rot = c * dx - s * dy
-        y_rot = s * dx + c * dy
-        rotated_atoms[i, 0] = x_rot
-        rotated_atoms[i, 1] = y_rot
-    return rotated_atoms
+    for i in range(len(atoms)):
+        x = atoms[i, 0]
+        y = atoms[i, 1]
+        rotated[i, 0] = c * x - s * y + center[0]
+        rotated[i, 1] = s * x + c * y + center[1]
+    return rotated
 
 @njit
 def compute_neighbors(atoms, bonds):
@@ -84,20 +81,16 @@ def compute_neighbors(atoms, bonds):
     '''
     N = len(atoms)
     neighbors = -np.ones((N, 3), dtype=np.int64)
-    for i, j in bonds:
-        if neighbors[i, 0] == -1:
-            neighbors[i, 0] = j
-        elif neighbors[i, 1] == -1:
-            neighbors[i, 1] = j
-        elif neighbors[i, 2] == -1:
-            neighbors[i, 2] = j
-
-        if neighbors[j, 0] == -1:
-            neighbors[j, 0] = i
-        elif neighbors[j, 1] == -1:
-            neighbors[j, 1] = i
-        elif neighbors[j, 2] == -1:
-            neighbors[j, 2] = i
+    for k in range(len(bonds)):
+        i, j = bonds[k, 0], bonds[k, 1]
+        for slot in range(3):
+            if neighbors[i, slot] == -1:
+                neighbors[i, slot] = j
+                break
+        for slot in range(3):
+            if neighbors[j, slot] == -1:
+                neighbors[j, slot] = i
+                break
     return neighbors
 
 def load_crystal(path):
@@ -105,17 +98,21 @@ def load_crystal(path):
     
     L = float(data['L'][0])
     rho = float(data['rho'][0])
-    points = data['points']
-    theta = data['theta']
 
     vor = PeriodicVoronoi(L, rho)
-    vor.points = points
-    vor.theta = theta
-    vor.N = len(points)
+    vor.points = data['points']
+    vor.theta = data['theta']
+    vor.N = len(vor.points)
     vor.build_periodic_voronoi()
     vor.get_adjacency()
 
-    crystal = GrapheneCrystal(vor)
+    crystal = GrapheneCrystal.__new__(GrapheneCrystal)
+    crystal.lattice = vor
+    crystal.L = L
+    crystal.N = vor.N
+    crystal.points = vor.points
+    crystal.theta = vor.theta
+
     crystal.atoms = data['atoms']
     crystal.bonds = data['bonds']
     crystal.neighbors = compute_neighbors(crystal.atoms, crystal.bonds)
@@ -127,11 +124,9 @@ class GrapheneCrystal:
     Create a polycrystalline graphene structure based on the Voronoi diagram
     Attributes:
         lattice : Voronoi lattice
-        vor : Voronoi diagram
         L : size of the box
         N : number of grains
         points : coordinates of the grain centers
-        all_points : coordinates of all grain centers (including images)
         theta : orientation of the grains
         atoms : coordinates of the atoms
         bonds : list of bonds between atoms
@@ -174,19 +169,22 @@ class GrapheneCrystal:
             max_bonds : maximum number of bonds per atom
         '''
         tree = cKDTree(self.atoms)
-        pairs = tree.query_pairs(a * 1.2)
+        raw_pairs = np.array(list(tree.query_pairs(a * 1.2)))
 
-        self.bonds = []
-        for i, j in pairs:
-            d = np.linalg.norm(self.atoms[i] - self.atoms[j])
-            if a * 0.8 <= d <= a * 1.2:
-                self.bonds.append((i, j))
-        self.bonds = np.array(self.bonds)
+        if len(raw_pairs) == 0:
+            self.bonds = np.empty((0, 2), dtype=np.int64)
+            return
+        
+        diff = self.atoms[raw_pairs[:, 0]] - self.atoms[raw_pairs[:, 1]]
+        dists = np.hypot(diff[:, 0], diff[:, 1])
+        mask = (dists >= a * 0.8) & (dists <= a * 1.2)
+        self.bonds = raw_pairs[mask]
 
         bond_count = np.zeros(len(self.atoms), dtype=np.int64)
         for i, j in self.bonds:
             bond_count[i] += 1
             bond_count[j] += 1
+
         overcoordinated = np.where(bond_count > max_bonds)[0]
         
         while len(overcoordinated) > 0:
@@ -289,20 +287,23 @@ class GrapheneCrystal:
             if -1 in vertices or len(vertices) == 0:
                 continue
 
-            polygon = Polygon(self.vor.vertices[vertices]).buffer(a * 0.8)
+            polygon = Polygon(self.vor.vertices[vertices]).buffer(a * 0.5)
+
+            min_x, min_y, max_x, max_y = polygon.bounds
+            if (max_x < 0 or min_x > self.L or max_y < 0 or min_y > self.L):
+                continue
 
             theta = self.theta[grain % self.N]
             center = self.all_points[grain]
+            
             rot_atoms = rotate_and_move_atoms(base_lattice, theta, center)
 
-            min_x, min_y, max_x, max_y = polygon.bounds
             mask = (rot_atoms[:, 0] >= min_x) & (rot_atoms[:, 0] <= max_x) & (rot_atoms[:, 1] >= min_y) & (rot_atoms[:, 1] <= max_y)
 
             rot_atoms = rot_atoms[mask]
 
-            for atom in rot_atoms:
-                if polygon.covers(Point(atom)):
-                    all_atoms.append(atom)
+            inside = np.array([polygon.contains(Point(atom)) for atom in rot_atoms])
+            all_atoms.append(rot_atoms[inside])
 
         self.atoms = np.vstack(all_atoms)
 
