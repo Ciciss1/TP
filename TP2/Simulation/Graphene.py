@@ -276,7 +276,6 @@ class GrapheneCrystal:
         '''
         
         base_lattice = generate_graphene_lattice(3 * self.L / 2, a)
-        base_lattice += np.array([self.L / 2, self.L / 2])
 
         all_atoms = []
 
@@ -330,12 +329,13 @@ class GrapheneCrystal:
         Compute the observables for the graphene crystal
         '''
         bin_bounds = np.linspace(0, self.L / 2, 51)
+        bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
         grain_mask = self.compute_grain_mask()
 
         psi6 = obs.compute_psi6(self.atoms, self.neighbors)
         G6 = obs.compute_orientational_correlation(psi6, self.atoms, bin_bounds)
         CG = obs.compute_translationnal_correlation_total(self.atoms, grain_mask, bin_bounds)
-        return bin_bounds, G6, CG
+        return bin_centers, G6, CG
 
     def plot_atoms(self):
         plt.figure(figsize=(6,6))
