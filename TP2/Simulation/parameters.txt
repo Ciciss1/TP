@@ -1,3 +1,21 @@
+# File directory
+
+output_dir = "results/"
+
+# Hamiltonian parameters
+
+epsilon = 0
+gamma = 1
+T = 1
+
+# Lattice parameters
+
+L = 300
+rho = 0.001
+n_monte_carlo = 20000
+
+# Annealing parameters
+
 unfreeze_dist = 1.5
 T_start = 16500
 T_end = 500
@@ -7,4 +25,3 @@ damping = 0.02
 dump_every = 100
 n_quench = 500
 n_iter = 1
-out_dir = "results/test_150"
