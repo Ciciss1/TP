@@ -3,7 +3,7 @@ from numba import njit
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-from scipy.spatial import Voronoi
+from scipy.spatial import Voronoi, cKDTree
 from shapely.geometry import Polygon
 
 @njit
@@ -39,7 +39,6 @@ def pick_substrate_points(substrate_coords, N, L):
     Outputs:
         chosen_coords : coordinates of the chosen substrate points
     '''
-    
     mask = (substrate_coords[:, 0] >= 0) & (substrate_coords[:, 0] < L) & (substrate_coords[:, 1] >= 0) & (substrate_coords[:, 1] < L)
     substrate_coords = substrate_coords[mask]
 
@@ -47,17 +46,18 @@ def pick_substrate_points(substrate_coords, N, L):
     if N > M:
         raise ValueError(f"Requested {N} points but only {M} are available.")
     
+    min_dist_sq = np.full(M, np.inf)
+
     chosen_indices = [np.random.randint(0, M)]
 
     for _ in range(N - 1):
-        chosen_pts = substrate_coords[chosen_indices]
-
-        diff = substrate_coords[:, None, :] - chosen_pts[None, :, :]
+        last = substrate_coords[chosen_indices[-1]]
+        diff = substrate_coords - last
         diff -= L * np.round(diff / L)
-        dist_sq = (diff ** 2).sum(axis=-1)
-        min_dist_sq = dist_sq.min(axis=1)
+        dist_sq = np.sum(diff**2, axis=1)
+        np.minimum(min_dist_sq, dist_sq, out=min_dist_sq)
 
-        best = np.flatnonzero(min_dist_sq == min_dist_sq.max())
+        best = np.flatnonzero(min_dist_sq == np.max(min_dist_sq))
         chosen_indices.append(np.random.choice(best))
 
     return substrate_coords[chosen_indices]
@@ -108,42 +108,27 @@ class PeriodicVoronoi:
         '''
         Get the adjacency list, edge lengths and vertex coordinates from the Voronoi diagram
         '''
-        adj_i = []
-        adj_j = []
-        adj_length = []
-
-        v1_list = []
-        v2_list = []
-
+        ridge_points = np.array(self.vor.ridge_points)
+        ridge_vertices = np.array(self.vor.ridge_vertices)
+        
         start = 4 * self.N
         end = 5 * self.N
 
-        for (i, j), verts in zip(self.vor.ridge_points, self.vor.ridge_vertices):
-            
-            if not (start <= i < end and start <= j < end):
-                continue
+        mask = ((ridge_points[:, 0] >= start) & (ridge_points[:, 0] < end) & (ridge_points[:, 1] >= start) & (ridge_points[:, 1] < end) & (ridge_vertices[:, 0] != -1) & (ridge_vertices[:, 1] != -1))
 
-            i -= start
-            j -= start
+        rp = ridge_points[mask] - start
+        rv = ridge_vertices[mask]
 
-            if -1 in verts or len(verts) != 2:
-                raise RuntimeError(f"Ridge between points {i} and {j} has an infinite vertex, which should not happen in a periodic Voronoi diagram.")
-            
-            v1, v2 = self.vor.vertices[verts]
-            length = np.linalg.norm(v1 - v2)
+        v1 = self.vor.vertices[rv[:, 0]]
+        v2 = self.vor.vertices[rv[:, 1]]
+        lengths = np.linalg.norm(v1 - v2, axis=1)
 
-            if length > 1e-6:
-                adj_i.append(i)
-                adj_j.append(j)
-                adj_length.append(length)
-                v1_list.append(v1)
-                v2_list.append(v2)
-
-        self.adj_i = np.array(adj_i, dtype=np.int32)
-        self.adj_j = np.array(adj_j, dtype=np.int32)
-        self.adj_length = np.array(adj_length, dtype=np.float64)
-        self.ridge_v1 = np.array(v1_list, dtype=np.float64)
-        self.ridge_v2 = np.array(v2_list, dtype=np.float64)
+        valid = lengths > 1e-6
+        self.adj_i = rp[valid, 0].astype(np.int32)
+        self.adj_j = rp[valid, 1].astype(np.int32)
+        self.adj_length = lengths[valid]
+        self.ridge_v1 = v1[valid]
+        self.ridge_v2 = v2[valid]
 
     def plot(self):
 

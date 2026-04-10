@@ -60,7 +60,7 @@ def compute_psi6(i, atoms, neighbors):
     return psi6            
 
 @njit
-def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples = 50_000):
+def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples = 1_000_000):
     '''
     Compute the orientational correlation function G6(r) 
     Inputs:
@@ -80,9 +80,7 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples =
 
     for _ in range(n_samples):
         i = np.random.randint(0, N)
-        j = np.random.randint(i, N)
-        if i == j:
-            continue
+        j = np.random.randint(0, N)
         
         dx = coords[i, 0] - coords[j, 0]
         dy = coords[i, 1] - coords[j, 1]
@@ -122,9 +120,6 @@ def compute_Sq_grid(x, y, qx_vals, qy_vals, q_min = 0.5):
     phase_x = np.exp(1j * np.outer(qx_vals, x))
     phase_y = np.exp(1j * np.outer(qy_vals, y))
 
-    fx = np.sum(phase_x, axis=1)
-    fy = np.sum(phase_y, axis=1)
-
     Sq_complex = phase_x @ phase_y.T
     Sq = (Sq_complex.real ** 2 + Sq_complex.imag ** 2) / N
 
@@ -138,7 +133,7 @@ def compute_Sq_grid(x, y, qx_vals, qy_vals, q_min = 0.5):
     return float(qx_vals[i_best]), float(qy_vals[j_best])
 
 @njit
-def compute_translationnal_correlation_grain(coords, bin_bounds, G, n_samples = 50_000):
+def compute_translationnal_correlation_grain(coords, bin_bounds, G, n_samples = 100_000):
     '''
     Compute the translational correlation function CG(r) for a single grain
     Inputs:
@@ -161,9 +156,7 @@ def compute_translationnal_correlation_grain(coords, bin_bounds, G, n_samples = 
 
     for _ in range(n_samples):
         i = np.random.randint(0, N)
-        j = np.random.randint(i, N)
-        if i == j:
-            continue
+        j = np.random.randint(0, N)
 
         dx = coords[i, 0] - coords[j, 0]
         dy = coords[i, 1] - coords[j, 1]
@@ -185,7 +178,7 @@ def compute_translationnal_correlation_grain(coords, bin_bounds, G, n_samples = 
             CG[b] /= count[b]
     return CG
 
-def compute_translationnal_correlation_total(atoms, grain_mask, bin_bounds, n_q = 200, q_max = 6.0, n_samples = 50_000):
+def compute_translationnal_correlation_total(atoms, grain_mask, bin_bounds, n_q = 200, q_max = 6.0, n_samples = 100_000):
     '''
     Compute the translational correlation function CG(r) for the whole system
     Inputs:
@@ -193,6 +186,7 @@ def compute_translationnal_correlation_total(atoms, grain_mask, bin_bounds, n_q 
         grain_mask : array of grain labels for each atom
         bin_bounds : array of bin boundaries
         n_q, q_max : parameters for the grid
+        n_samples : number of samples to use for the correlation function
     Outputs:
         CG_total : translational correlation function for the whole system
     '''

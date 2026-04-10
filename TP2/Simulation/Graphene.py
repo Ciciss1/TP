@@ -5,7 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from numba import njit
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
+from shapely.vectorized import contains
 from scipy.spatial import cKDTree
 from collections import defaultdict
 
@@ -126,6 +127,7 @@ class GrapheneCrystal:
         lattice : Voronoi lattice
         L : size of the box
         N : number of grains
+        rho : density of grains
         points : coordinates of the grain centers
         theta : orientation of the grains
         atoms : coordinates of the atoms
@@ -137,6 +139,7 @@ class GrapheneCrystal:
         self.vor = voronoi.vor
         self.L = voronoi.L
         self.N = voronoi.N
+        self.rho = voronoi.rho
         self.points = voronoi.points
         self.all_points = voronoi.all_points
         self.theta = voronoi.theta
@@ -275,7 +278,7 @@ class GrapheneCrystal:
             a : carbon-carbon bond length
         '''
         
-        base_lattice = generate_graphene_lattice(3 * self.L / 2, a)
+        base_lattice = generate_graphene_lattice(self.L, a)
 
         all_atoms = []
 
@@ -301,7 +304,7 @@ class GrapheneCrystal:
 
             rot_atoms = rot_atoms[mask]
 
-            inside = np.array([polygon.contains(Point(atom)) for atom in rot_atoms])
+            inside = contains(polygon, rot_atoms[:, 0], rot_atoms[:, 1])
             all_atoms.append(rot_atoms[inside])
 
         self.atoms = np.vstack(all_atoms)
@@ -328,14 +331,17 @@ class GrapheneCrystal:
         '''
         Compute the observables for the graphene crystal
         '''
-        bin_bounds = np.linspace(0, self.L / 2, 51)
-        bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
+        bin_bounds_G6 = np.linspace(0, self.L / 2, 101)
+        bin_centers_G6 = 0.5 * (bin_bounds_G6[:-1] + bin_bounds_G6[1:])
+
+        bin_bounds_CG = np.linspace(0, np.sqrt(1 / self.rho), 51)
+        bin_centers_CG = 0.5 * (bin_bounds_CG[:-1] + bin_bounds_CG[1:])
+        
         grain_mask = self.compute_grain_mask()
 
-        psi6 = obs.compute_psi6(self.atoms, self.neighbors)
-        G6 = obs.compute_orientational_correlation(psi6, self.atoms, bin_bounds)
-        CG = obs.compute_translationnal_correlation_total(self.atoms, grain_mask, bin_bounds)
-        return bin_centers, G6, CG
+        G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds_G6)
+        CG = obs.compute_translationnal_correlation_total(self.atoms, grain_mask, bin_bounds_CG)
+        return bin_centers_G6, G6, bin_centers_CG, CG
 
     def plot_atoms(self):
         plt.figure(figsize=(6,6))
@@ -371,5 +377,5 @@ class GrapheneCrystal:
             points = self.points,
             theta = self.theta,
             L = np.array([self.L]),
-            rho = np.array([self.lattice.rho]),
+            rho = np.array([self.rho]),
         )
