@@ -5,8 +5,9 @@ output_dir = "results/"
 # Hamiltonian parameters
 
 epsilon = 0
-gamma = 1
-T = 1
+alpha = 2.36
+beta_RS = -0.12
+T = 80
 
 # Lattice parameters
 

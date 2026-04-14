@@ -1,5 +1,6 @@
 import numpy as np
 from numba import njit
+from sympy import beta
 from tqdm import tqdm
 
 PI = np.pi
@@ -12,14 +13,14 @@ def wrap_angle_pi_6(angle):
     return (angle + PI / 6) % (PI / 3) - PI / 6
 
 @njit
-def energy(theta, adj_i, adj_j, adj_length, epsilon, rho, gamma):
+def energy(theta, adj_i, adj_j, adj_length, epsilon, rho, alpha, beta_RS):
     '''
     Compute the energy of the system.
     Inputs:
         theta : array of angles
         adj_i, adj_j : indices of adjacent points
         adj_length : length of the edge between adjacent points
-        epsilon, rho, gamma : parameters
+        epsilon, rho, alpha, beta_RS : parameters
     Outputs:
         energy of the system
     '''
@@ -32,12 +33,12 @@ def energy(theta, adj_i, adj_j, adj_length, epsilon, rho, gamma):
 
         dtheta = np.abs(wrap_angle_pi_6(theta[i] - theta[j]))
 
-        H_int += length * dtheta * (1 - np.log(max(dtheta, 1e-10)))
-    H_int *= gamma
+        H_int += length * dtheta * (beta_RS - np.log(max(dtheta, 1e-10)))
+    H_int *= alpha
     return H_0 + H_int
 
 @njit
-def dhamiltonian(i, theta, new_theta, adj_i, adj_j, adj_length, epsilon, rho, gamma):
+def dhamiltonian(i, theta, new_theta, adj_i, adj_j, adj_length, epsilon, rho, alpha, beta_RS):
     '''
     Compute the change in energy when i is changed
     Inputs:
@@ -46,7 +47,7 @@ def dhamiltonian(i, theta, new_theta, adj_i, adj_j, adj_length, epsilon, rho, ga
         new_theta : new angle at point i
         adj_i, adj_j : indices of adjacent points
         adj_length : length of the edge between adjacent points
-        epsilon, rho, gamma : parameters
+        epsilon, rho, alpha, beta_RS : parameters
     Outputs:
         change in energy
     '''
@@ -59,18 +60,18 @@ def dhamiltonian(i, theta, new_theta, adj_i, adj_j, adj_length, epsilon, rho, ga
             length = adj_length[k]
             dtheta_old = np.abs(wrap_angle_pi_6(old_theta - theta[j]))
             dtheta_new = np.abs(wrap_angle_pi_6(new_theta - theta[j]))
-            dH_int += length * (dtheta_new * (1 - np.log(max(dtheta_new, 1e-10))) - dtheta_old * (1 - np.log(max(dtheta_old, 1e-10))))
+            dH_int += length * (dtheta_new * (beta_RS - np.log(max(dtheta_new, 1e-10))) - dtheta_old * (beta_RS - np.log(max(dtheta_old, 1e-10))))
         elif adj_j[k] == i:
             j = adj_i[k]
             length = adj_length[k]
             dtheta_old = np.abs(wrap_angle_pi_6(old_theta - theta[j]))
             dtheta_new = np.abs(wrap_angle_pi_6(new_theta - theta[j]))
-            dH_int += length * (dtheta_new * (1 - np.log(max(dtheta_new, 1e-10))) - dtheta_old * (1 - np.log(max(dtheta_old, 1e-10))))
-    dH_int *= gamma
+            dH_int += length * (dtheta_new * (beta_RS - np.log(max(dtheta_new, 1e-10))) - dtheta_old * (beta_RS - np.log(max(dtheta_old, 1e-10))))
+    dH_int *= alpha
     return dH_0 + dH_int
 
 @njit
-def metropolis_sweep(theta, adj_i, adj_j, adj_length, beta, delta_theta, epsilon, rho, gamma):
+def metropolis_sweep(theta, adj_i, adj_j, adj_length, beta, delta_theta, epsilon, rho, alpha, beta_RS):
     '''
     Perform a Metropolis sweep the lattice
     Inputs:
@@ -79,7 +80,7 @@ def metropolis_sweep(theta, adj_i, adj_j, adj_length, beta, delta_theta, epsilon
         adj_length : length of the edge between adjacent points
         beta : inverse temperature
         delta_theta : maximum change in angle
-        epsilon, rho, gamma : parameters
+        epsilon, rho, alpha, beta_RS : parameters
     Outputs:
         attempts : number of attempted moves
         accepts : number of accepted moves
@@ -92,7 +93,7 @@ def metropolis_sweep(theta, adj_i, adj_j, adj_length, beta, delta_theta, epsilon
         i = np.random.randint(N)
         old_theta = theta[i]
         new_theta = wrap_angle_pi_6(old_theta + (np.random.rand() * 2 - 1) * delta_theta)
-        dH = dhamiltonian(i, theta, new_theta, adj_i, adj_j, adj_length, epsilon, rho, gamma)
+        dH = dhamiltonian(i, theta, new_theta, adj_i, adj_j, adj_length, epsilon, rho, alpha, beta_RS)
         attempts += 1
         if dH < 0.0 or np.random.rand() < np.exp(-beta * dH):
             theta[i] = new_theta
@@ -114,19 +115,19 @@ def adapt_delta(delta_theta, acceptance_rate, target_rate=0.5, adaptation_factor
         delta_theta = min(delta_theta * adaptation_factor, max_delta)
     return delta_theta
 
-def monte_carlo(theta, adj_i, adj_j, adj_length, beta, epsilon, rho, gamma, n_sweeps = 1000, convergence_threshold=1e-3):
+def monte_carlo(theta, adj_i, adj_j, adj_length, beta, epsilon, rho, alpha, beta_RS, n_sweeps = 1000, convergence_threshold=1e-3):
 
     delta_theta = 0.1
     attempts = 0
     accepts = 0
 
     energy_history = []
-    energy_history.append(energy(theta, adj_i, adj_j, adj_length, epsilon, rho, gamma))
+    energy_history.append(energy(theta, adj_i, adj_j, adj_length, epsilon, rho, alpha, beta_RS))
 
     counter = 0
 
     for sweep in tqdm(range(n_sweeps), desc="Monte Carlo Sweeps"):
-        a, acc = metropolis_sweep(theta, adj_i, adj_j, adj_length, beta, delta_theta, epsilon, rho, gamma)
+        a, acc = metropolis_sweep(theta, adj_i, adj_j, adj_length, beta, delta_theta, epsilon, rho, alpha, beta_RS)
         attempts += a
         accepts += acc
 
@@ -136,7 +137,7 @@ def monte_carlo(theta, adj_i, adj_j, adj_length, beta, epsilon, rho, gamma, n_sw
             attempts = 0
             accepts = 0
 
-            current_energy = energy(theta, adj_i, adj_j, adj_length, epsilon, rho, gamma)
+            current_energy = energy(theta, adj_i, adj_j, adj_length, epsilon, rho, alpha, beta_RS)
             energy_history.append(current_energy)
 
             if len(energy_history) > 2:
