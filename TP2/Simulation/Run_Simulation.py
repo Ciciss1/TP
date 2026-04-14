@@ -65,9 +65,3 @@ if __name__ == "__main__":
         n_iter,
         out_dir = output_dir,
     )
-
-    final_crystal = load_crystal(os.path.join(output_dir, f"final_crystal.npz"))
-
-    bin_centers, G6, CG = final_crystal.compute_observables()
-
-    
