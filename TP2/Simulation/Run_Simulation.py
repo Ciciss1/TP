@@ -16,7 +16,8 @@ if __name__ == "__main__":
         os.makedirs(output_dir)
 
     epsilon = params["epsilon"]
-    gamma = params["gamma"]
+    alpha = params["alpha"]
+    beta_RS = params["beta_RS"]
     T = params["T"]
 
     L = params["L"]
@@ -43,7 +44,8 @@ if __name__ == "__main__":
                     1/T,
                     epsilon,
                     rho,
-                    gamma,
+                    alpha,
+                    beta_RS,
                     n_monte_carlo,
     )
 
@@ -65,9 +67,3 @@ if __name__ == "__main__":
         n_iter,
         out_dir = output_dir,
     )
-
-    final_crystal = load_crystal(os.path.join(output_dir, f"final_crystal.npz"))
-
-    bin_centers, G6, CG = final_crystal.compute_observables()
-
-    
