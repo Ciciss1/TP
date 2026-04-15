@@ -1,6 +1,5 @@
 import numpy as np
 from numba import njit
-from sympy import beta
 from tqdm import tqdm
 
 PI = np.pi

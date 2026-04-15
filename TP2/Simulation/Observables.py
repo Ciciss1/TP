@@ -189,16 +189,16 @@ def compute_reference_sites(atoms, grain_mask, grain_centers, grain_thetas, L, a
 @njit(parallel=True, cache=True)
 def compute_GT_kernel(R, grain_of_atoms, Gx_per_grain, Gy_per_grain, bin_bounds, n_samples, n_threads):
     '''
-    Compute the GT kernel for the correlation function
+    Compute the translational correlation function GT(r) for a single grain
     Inputs:
         R : coordinates of the reference sites for each atom
         grain_of_atoms : array indicating the grain of each atom
-        Gx_per_grain, Gy_per_grain : components of the mean reciprocal lattice vector G for each grain
-        bin_bounds : array of bin boundaries
+        Gx_per_grain, Gy_per_grain : components of the reciprocal lattice vector for each grain
+        bin_bounds : array of bin boundariesµ
         n_samples : number of samples to use for the correlation function
         n_threads : number of threads to use for parallelization
     Outputs:
-        GT : GT kernel for each bin
+        GT : translational correlation for each grain
     '''
     N = len(R)
     num_bins = len(bin_bounds) - 1
@@ -225,7 +225,7 @@ def compute_GT_kernel(R, grain_of_atoms, Gx_per_grain, Gy_per_grain, bin_bounds,
             b = bin_index(r, bin_bounds)
             if b < 0:
                 continue
-
+            
             gi = grain_of_atoms[i]
             gj = grain_of_atoms[j]
 
@@ -251,7 +251,7 @@ def compute_GT_kernel(R, grain_of_atoms, Gx_per_grain, Gy_per_grain, bin_bounds,
 
     return GT
 
-def compute_translational_correlation(atoms, grain_mask, grain_centers, grain_thetas, bin_bounds, L, n_samples = 500_000, a_CC = 1.42, n_threads = 4):
+def compute_translational_correlation(atoms, grain_mask, grain_centers, grain_thetas, bin_bounds, L, n_samples = 200_000, a_CC = 1.42, n_threads = 4):
     '''
     Compute the translational correlation function GT(r) 
     Inputs:
@@ -267,20 +267,43 @@ def compute_translational_correlation(atoms, grain_mask, grain_centers, grain_th
     Outputs:
         GT : translational correlation function
     '''
-    R = compute_reference_sites(atoms, grain_mask, grain_centers, grain_thetas, L, a_CC)
+    a = a_CC * np.sqrt(3)
+    b1 = (2 * np.pi / a) * np.array([1, -1/np.sqrt(3)])
+    b2 = (2 * np.pi / a) * np.array([0, 2/np.sqrt(3)])
+    G_base = 2 * b1 + b2
 
-    G_norm = 4 * np.pi / (a_CC * 3)
-    Gx_per_grain = (G_norm * np.cos(grain_thetas)).astype(np.float64)
-    Gy_per_grain = (G_norm * np.sin(grain_thetas)).astype(np.float64)
+    N = len(atoms)
+    R = np.empty((N, 2), dtype=np.float64)
+    Gx_per_grain = np.empty(len(grain_centers), dtype=np.float64)
+    Gy_per_grain = np.empty(len(grain_centers), dtype=np.float64)
 
-    grain_of_atoms = grain_mask.astype(np.int64)
+    grain_ids = np.unique(grain_mask)
+    grain_ids = grain_ids[grain_ids >= 0]
+
+    for gid in grain_ids:
+        idx = np.where(grain_mask == gid)[0]
+        theta = grain_thetas[gid]
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+
+        Gx_per_grain[gid] = G_base[0] * cos_t - G_base[1] * sin_t
+        Gy_per_grain[gid] = G_base[0] * sin_t + G_base[1] * cos_t
+
+        ref = build_reference_sites(
+            float(grain_centers[gid, 0]), float(grain_centers[gid, 1]),
+            float(np.cos(grain_thetas[gid])), float(np.sin(grain_thetas[gid])),
+            float(L), float(a_CC)
+        )
+        _, nn = cKDTree(ref).query(atoms[idx], k=1, workers=-1)
+        R[idx] = ref[nn]
 
     GT = compute_GT_kernel(
         np.ascontiguousarray(R, dtype=np.float64),
-        np.ascontiguousarray(grain_of_atoms, dtype=np.int64),
+        np.ascontiguousarray(grain_mask, dtype=np.int64),
         np.ascontiguousarray(Gx_per_grain, dtype=np.float64),
         np.ascontiguousarray(Gy_per_grain, dtype=np.float64),
         np.ascontiguousarray(bin_bounds, dtype=np.float64),
-        int(n_samples), int(n_threads))
+        int(n_samples), int(n_threads)
+    )
 
     return GT

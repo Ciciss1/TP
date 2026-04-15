@@ -13,13 +13,13 @@ T = 80
 
 L = 300
 rho = 0.001
-n_monte_carlo = 20000
+n_monte_carlo = 100_000
 
 # Annealing parameters
 
 unfreeze_dist = 1.5
-T_start = 16500
-T_end = 500
+T_start = 10000
+T_end = 50
 n_anneal = 5000
 n_min = 5000
 damping = 0.02

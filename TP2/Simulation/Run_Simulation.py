@@ -10,11 +10,6 @@ if __name__ == "__main__":
     with open("parameters.txt") as f:
         exec(f.read(), {}, params)
 
-    output_dir = params["output_dir"]
-
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
     epsilon = params["epsilon"]
     alpha = params["alpha"]
     beta_RS = params["beta_RS"]
@@ -34,6 +29,12 @@ if __name__ == "__main__":
     n_quench = params["n_quench"]
     n_iter = params["n_iter"]
 
+    output_dir = params["output_dir"]
+    output_dir = os.path.join(output_dir, f"epsilon_{epsilon}/rho_{rho}/T_{T}/")
+    os.makedirs(output_dir, exist_ok=True)
+
+    print("Creating Voronoi lattice...")
+
     vor = PeriodicVoronoi(L, rho)
 
     thetas, _ = monte_carlo(
@@ -51,6 +52,8 @@ if __name__ == "__main__":
 
     vor.theta = thetas
 
+    print("Creating graphene crystal...")
+
     initial_crystal = GrapheneCrystal(vor)
 
     initial_crystal.save_crystal(os.path.join(output_dir, "initial_crystal.npz"))
@@ -65,5 +68,5 @@ if __name__ == "__main__":
         dump_every,
         n_quench,
         n_iter,
-        out_dir = output_dir,
+        out_dir = output_dir
     )
