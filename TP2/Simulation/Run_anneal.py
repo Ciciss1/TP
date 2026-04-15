@@ -2,18 +2,15 @@ import os
 import shutil
 import subprocess
 import numpy as np
-import sys
 from tqdm import tqdm
 
-sys.path.insert(0, "TP2/Simulation")
 from Graphene import load_crystal
 from LammpsWriter import LammpsWriter
 
 LAMMPS_CMD_KOKKOS = (
-    "/home/alexi/lammps/build-kokkos/lmp"
-    " -k on g 1 t 1"
-    " -sf kk"
-    " -pk kokkos neigh half"
+    "mpirun -np 4 /home/alexi/lammps/build-gpu/lmp"
+    " -sf omp"
+    " -pk omp 2"
 )
 
 def lammps_run(lammps_cmd, inp_file, out_file, cwd):
@@ -29,11 +26,10 @@ def read_energy(out_path):
     with open(out_path) as f:
         lines = f.readlines()
     for line in reversed(lines):
-        if "Energy" in line:
-            try:
-                return float(line.split()[-1])
-            except ValueError:
-                pass
+        try:
+            return float(line.split("=")[1].strip().split()[0])
+        except (ValueError, IndexError):
+            pass
     return None
 
 def read_final_coords(traj_path):
@@ -75,12 +71,13 @@ def run_anneal(
         lammps_cmd = LAMMPS_CMD_KOKKOS,
         a = 1.42,
 ):
-    out_dir = os.path.abspath(out_dir)
-    os.makedirs(out_dir, exist_ok=True)
+    output_anneal = os.path.abspath(out_dir)
+    output_anneal = os.path.join(output_anneal, f"anneal/")
+    os.makedirs(output_anneal, exist_ok=True)
     
     airebo_file = "CH.airebo"
     if os.path.exists(airebo_file):
-        shutil.copy(airebo_file, out_dir)
+        shutil.copy(airebo_file, output_anneal)
     else:
         raise FileNotFoundError("CH.airebo not found")
     
@@ -94,11 +91,11 @@ def run_anneal(
     energies = []
 
     for i in tqdm(range(n_iter), desc="Annealing iterations"):
-        name_2d = os.path.join(out_dir, f"sim_iter_{i}_2d")
+        name_2d = os.path.join(output_anneal, f"sim_iter_{i}_2d")
         basename_2d = os.path.basename(name_2d)
-        inp_path_2d = os.path.join(out_dir, f"{basename_2d}_2d.inp")
-        out_path_2d = os.path.join(out_dir, f"{basename_2d}_2d.out")
-        trj_2d = os.path.join(out_dir, f"{basename_2d}.lammpstrj")
+        inp_path_2d = os.path.join(output_anneal, f"{basename_2d}.inp")
+        out_path_2d = os.path.join(output_anneal, f"{basename_2d}.out")
+        trj_2d = os.path.join(output_anneal, f"{basename_2d}.lammpstrj")
 
         writer.write(name_2d)
         writer.write_input_2d(
@@ -112,17 +109,17 @@ def run_anneal(
             seed = None
         )
             
-        lammps_run(lammps_cmd, inp_path_2d, out_path_2d, cwd = out_dir)
+        lammps_run(lammps_cmd, inp_path_2d, out_path_2d, cwd = output_anneal)
         
         if os.path.exists(trj_2d):
             writer.atoms = read_final_coords(trj_2d)
         else:
             raise FileNotFoundError(f"Trajectory file {trj_2d} not found after 2D anneal.")
         
-        name_3d = os.path.join(out_dir, f"sim_iter_{i}_3d")
+        name_3d = os.path.join(output_anneal, f"sim_iter_{i}_3d")
         basename_3d = os.path.basename(name_3d)
-        inp_path_3d = os.path.join(out_dir, f"{basename_3d}_3d.inp")
-        out_path_3d = os.path.join(out_dir, f"{basename_3d}_3d.out")
+        inp_path_3d = os.path.join(output_anneal, f"{basename_3d}.inp")
+        out_path_3d = os.path.join(output_anneal, f"{basename_3d}.out")
         
         writer.write(name_3d)
         writer.write_input_3d(
@@ -135,7 +132,7 @@ def run_anneal(
             seed = None
         )
         
-        lammps_run(lammps_cmd, inp_path_3d, out_path_3d, cwd = out_dir)
+        lammps_run(lammps_cmd, inp_path_3d, out_path_3d, cwd = output_anneal)
 
         E = read_energy(out_path_3d)
         energies.append(E)
@@ -144,7 +141,7 @@ def run_anneal(
     E_mean = float(np.mean(E_vals)) if E_vals else None
     print(f"Mean Energy over {n_iter} iterations: {E_mean}")
 
-    graphene.atoms = writer.atoms + writer.L / 2
+    graphene.atoms = writer.atoms + np.array([writer.L/2, writer.L/2])
     graphene.build_graphene_bonds()
 
     graphene.save_crystal(os.path.join(out_dir, "final_crystal.npz"))

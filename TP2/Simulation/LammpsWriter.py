@@ -54,8 +54,9 @@ class LammpsWriter:
     def __init__(self, graphene: GrapheneCrystal, unfreeze_dist = 2.0):
         self.crystal = graphene
         self.voronoi = graphene.lattice
-        self.atoms = graphene.atoms
         self.L = graphene.lattice.L
+        self.atoms = graphene.atoms
+        self.atoms -= np.array([self.L/2, self.L/2])        
         self.unfreeze_dist = unfreeze_dist
         self.unfreeze_mask = find_gb_atoms(self.atoms, self.voronoi.ridge_v1, self.voronoi.ridge_v2, unfreeze_dist)
 
@@ -69,7 +70,7 @@ class LammpsWriter:
         Ly = self.L
         Lz = self.Z_THICKNESS
 
-        xy = self.atoms - np.array([Lx/2, Ly/2])
+        xy = self.atoms
 
         with open(path, 'w') as f:
             f.write(f"LAMMPS data file\n\n")
@@ -96,7 +97,7 @@ class LammpsWriter:
             seed = np.random.randint(1, int(1e6))
 
         basename = os.path.basename(filename)
-        path = filename + "_2d.inp"
+        path = filename + ".inp"
 
         freeze_group = "freeze"
         unfreeze_group = "unfreeze"
@@ -112,7 +113,7 @@ class LammpsWriter:
             f.write(f"read_data {basename}.coord\n\n")
 
             # ---AIREBO potential---
-            f.write("pair_style airebo 3.0\n")
+            f.write("pair_style airebo 3.0 0 0\n")
             f.write("pair_coeff * * CH.airebo C\n\n")
 
             # ---dump---
@@ -161,7 +162,7 @@ class LammpsWriter:
             seed = np.random.randint(1, int(1e6))
 
         basename = os.path.basename(filename)
-        path = filename + "_3d.inp"
+        path = filename + ".inp"
 
         with open(path, 'w') as f:
             # ---Header---
@@ -173,7 +174,7 @@ class LammpsWriter:
             f.write(f"read_data {basename}.coord\n\n")
 
             # ---AIREBO potential---
-            f.write("pair_style airebo 3.0\n")
+            f.write("pair_style airebo 3.0 0 0\n")
             f.write("pair_coeff * * CH.airebo C\n\n")
 
             # ---dump---
