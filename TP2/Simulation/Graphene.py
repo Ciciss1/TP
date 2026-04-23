@@ -325,20 +325,17 @@ class GrapheneCrystal:
         _, grain_mask = tree.query(self.atoms)
         return grain_mask.astype(np.int32)
 
-    def compute_observables(self):
+    def compute_observables(self, bin_bounds=None):
         '''
         Compute the observables for the graphene crystal
         '''
-        bin_bounds = np.linspace(0, self.L / 2, 101)
+        if bin_bounds is None:
+            bin_bounds = np.linspace(0, 2 * self.L / 3, 50)
         bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
-
-        grain_mask = self.compute_grain_mask()
 
         G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds)
 
-        GT = obs.compute_translational_correlation(self.atoms, grain_mask, self.points, self.theta, bin_bounds, self.L)
-
-        return bin_centers, G6, GT
+        return bin_centers, G6
 
     def plot_atoms(self):
         plt.figure(figsize=(6,6))

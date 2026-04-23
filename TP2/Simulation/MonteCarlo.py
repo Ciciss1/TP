@@ -114,7 +114,7 @@ def adapt_delta(delta_theta, acceptance_rate, target_rate=0.5, adaptation_factor
         delta_theta = min(delta_theta * adaptation_factor, max_delta)
     return delta_theta
 
-def monte_carlo(theta, adj_i, adj_j, adj_length, beta, epsilon, rho, alpha, beta_RS, n_sweeps = 1000, convergence_threshold=1e-3):
+def monte_carlo(theta, adj_i, adj_j, adj_length, beta, epsilon, rho, alpha, beta_RS, n_sweeps = 1000, convergence_threshold=1e-3, use_tqdm=True):
 
     delta_theta = 0.1
     attempts = 0
@@ -125,7 +125,8 @@ def monte_carlo(theta, adj_i, adj_j, adj_length, beta, epsilon, rho, alpha, beta
 
     counter = 0
 
-    for sweep in tqdm(range(n_sweeps), desc="Monte Carlo Sweeps"):
+    iterator = tqdm(range(n_sweeps), desc="Monte Carlo Sweeps") if use_tqdm else range(n_sweeps)
+    for sweep in iterator:
         a, acc = metropolis_sweep(theta, adj_i, adj_j, adj_length, beta, delta_theta, epsilon, rho, alpha, beta_RS)
         attempts += a
         accepts += acc
