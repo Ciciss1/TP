@@ -7,9 +7,9 @@ from scipy.spatial import Voronoi, cKDTree
 from shapely.geometry import Polygon
 
 @njit
-def generate_square_substrate(L, a_sub = 2.556):
+def generate_cu_111_substrate(L, a_sub = 2.556):
     '''
-    Generate a square substrate lattice with lattice constant a_sub
+    Generate a Cu(111) lattice with lattice constant a_sub
     Inputs:
         L : size of the box
         a_sub : lattice constant of the substrate
@@ -17,9 +17,9 @@ def generate_square_substrate(L, a_sub = 2.556):
         coords : coordinates of the substrate points
     '''
     a1 = np.array([a_sub, 0])
-    a2 = np.array([0, a_sub])
+    a2 = np.array([a_sub * 0.5, a_sub * np.sqrt(3) * 0.5])
 
-    nmax = int(L / a_sub) + 3
+    nmax = int(L / a_sub) + 5
     coords = []
 
     for i in range(-nmax, nmax):
@@ -46,21 +46,9 @@ def pick_substrate_points(substrate_coords, N, L):
     if N > M:
         raise ValueError(f"Requested {N} points but only {M} are available.")
     
-    min_dist_sq = np.full(M, np.inf)
-
-    chosen_indices = [np.random.randint(0, M)]
-
-    for _ in range(N - 1):
-        last = substrate_coords[chosen_indices[-1]]
-        diff = substrate_coords - last
-        diff -= L * np.round(diff / L)
-        dist_sq = np.sum(diff**2, axis=1)
-        np.minimum(min_dist_sq, dist_sq, out=min_dist_sq)
-
-        best = np.flatnonzero(min_dist_sq == np.max(min_dist_sq))
-        chosen_indices.append(np.random.choice(best))
-
-    return substrate_coords[chosen_indices]
+    indices = np.random.choice(M, N, replace=False)
+    chosen_coords = substrate_coords[indices]
+    return chosen_coords
 
 class PeriodicVoronoi:
     def __init__(self, L, rho):
@@ -82,7 +70,7 @@ class PeriodicVoronoi:
         self.rho = rho
         self.N = max(1, int(rho * L * L))
 
-        self.points = pick_substrate_points(np.array(generate_square_substrate(L)), self.N, L)
+        self.points = pick_substrate_points(np.array(generate_cu_111_substrate(2 * L)), self.N, L)
                
         self.build_periodic_voronoi()
         self.get_adjacency()

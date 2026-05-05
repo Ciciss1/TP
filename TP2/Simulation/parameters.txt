@@ -6,7 +6,7 @@ core = 6
 
 # Hamiltonian parameters
 
-epsilon = 1
+epsilon = 0
 alpha = 2.36
 beta_RS = -0.12
 T = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]

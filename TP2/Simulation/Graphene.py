@@ -31,7 +31,7 @@ def generate_graphene_lattice(L, a_CC = 1.42):
     bA = np.array([0, 0])
     bB = np.array([a/2, a*np.sqrt(3)/6])
 
-    nmax = int(L / a) + 3
+    nmax = int(L / a) + 5
 
     atoms = np.empty((8 * nmax**2, 2), dtype=np.float64)
 
