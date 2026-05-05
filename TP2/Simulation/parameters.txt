@@ -1,25 +1,28 @@
-# File directory
+# File directory and computational parameters
 
 output_dir = "results/"
+multi_threading = True #If True, the simulations will be run in parallel without annealing
+core = 6
 
 # Hamiltonian parameters
 
-epsilon = 0
+epsilon = 1
 alpha = 2.36
 beta_RS = -0.12
-T = 80
+T = [1, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20]
 
 # Lattice parameters
 
-L = 300
+L = 500
 rho = 0.001
-n_monte_carlo = 100_000
+n_monte_carlo = 200_000
 
 # Annealing parameters
 
-unfreeze_dist = 1.5
+run_anneal_bool = False
+unfreeze_dist = 5
 T_start = 10000
-T_end = 50
+T_end = 20
 n_anneal = 5000
 n_min = 5000
 damping = 0.02

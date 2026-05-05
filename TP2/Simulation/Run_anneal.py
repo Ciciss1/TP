@@ -49,7 +49,7 @@ def read_final_coords(traj_path):
         if line.startswith("ITEM:"):
             break
         parts = line.split()
-        if len(parts) >= 5:
+        if len(parts) >= 4:
             xyz.append([float(parts[2]), float(parts[3])])
 
     if not xyz:

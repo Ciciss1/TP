@@ -55,7 +55,7 @@ class LammpsWriter:
         self.crystal = graphene
         self.voronoi = graphene.lattice
         self.L = graphene.lattice.L
-        self.atoms = graphene.atoms
+        self.atoms = graphene.atoms.copy()
         self.atoms -= np.array([self.L/2, self.L/2])        
         self.unfreeze_dist = unfreeze_dist
         self.unfreeze_mask = find_gb_atoms(self.atoms, self.voronoi.ridge_v1, self.voronoi.ridge_v2, unfreeze_dist)
@@ -117,9 +117,8 @@ class LammpsWriter:
             f.write("pair_coeff * * CH.airebo C\n\n")
 
             # ---dump---
-            f.write(f"dump DDump all atom {dump_every} {basename}.lammpstrj\n")
-            f.write("dump_modify DDump sort id\n")
-            f.write("dump_modify DDump scale no\n\n")
+            f.write(f"dump DDump all custom {dump_every} {basename}.lammpstrj id type x y\n")
+            f.write("dump_modify DDump sort id\n\n")
 
             # ---timestep / thermo---
             f.write("timestep 0.0002\n")
