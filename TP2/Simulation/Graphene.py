@@ -115,7 +115,7 @@ def load_crystal(path):
     crystal.theta = vor.theta
 
     crystal.atoms = data['atoms']
-    crystal.bonds = data['bonds']
+    crystal.bonds = crystal.build_graphene_bonds()
     crystal.neighbors = compute_neighbors(crystal.atoms, crystal.bonds)
 
     return crystal
@@ -364,9 +364,8 @@ class GrapheneCrystal:
     def save_crystal(self, path):
         if not os.path.exists(os.path.dirname(path)):
             os.makedirs(os.path.dirname(path))
-        np.savez(
+        np.savez_compressed(
             path,
-            bonds = self.bonds,
             atoms = self.atoms,
             points = self.points,
             theta = self.theta,

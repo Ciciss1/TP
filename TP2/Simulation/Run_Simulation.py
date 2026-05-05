@@ -9,7 +9,7 @@ from Run_anneal import run_anneal
 
 def run_simulation(args):
     T, L, epsilon, rho, alpha, beta_RS, n_monte_carlo, output_dir = args
-    output_dir = os.path.join(output_dir, f"L{L}/epsilon_{epsilon}/rho_{rho}/T_{T}/")
+    output_dir = os.path.join(output_dir, f"eps_{epsilon}/L_{L}/rho_{rho}/T_{T}/")
     os.makedirs(output_dir, exist_ok=True)
 
     vor = PeriodicVoronoi(L, rho)
@@ -31,8 +31,6 @@ def run_simulation(args):
     vor.theta = thetas
 
     initial_crystal = GrapheneCrystal(vor)
-
-    initial_crystal.save_crystal(os.path.join(output_dir, "initial_crystal.npz"))
 
     initial_crystal.save_crystal(os.path.join(output_dir, "final_crystal.npz"))
 
@@ -83,7 +81,7 @@ if __name__ == "__main__":
         for T in Ts:
 
             output_dir = params["output_dir"]
-            output_dir = os.path.join(output_dir, f"L{L}/epsilon_{epsilon}/rho_{rho}/T_{T}/")
+            output_dir = os.path.join(output_dir, f"eps_{epsilon}/L_{L}/rho_{rho}/T_{T}/")
             os.makedirs(output_dir, exist_ok=True)
 
             print("Creating Voronoi lattice...")
@@ -109,9 +107,10 @@ if __name__ == "__main__":
 
             initial_crystal = GrapheneCrystal(vor)
 
-            initial_crystal.save_crystal(os.path.join(output_dir, "initial_crystal.npz"))
-
             if run_anneal_bool:
+                
+                initial_crystal.save_crystal(os.path.join(output_dir, "initial_crystal.npz"))
+
                 run_anneal(
                     unfreeze_dist,
                     T_start,
