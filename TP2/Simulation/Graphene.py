@@ -6,11 +6,13 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from numba import njit
 from shapely.geometry import Polygon
-from shapely.vectorized import contains
+from shapely import contains_xy
 from scipy.spatial import Voronoi, cKDTree
+import torch
 
 import Observables as obs
 from Voronoi import PeriodicVoronoi
+from Lloyd_GPU import LloydHybrid
 
 @njit
 def generate_triangular_lattice(L, a_CC = 1.42):
@@ -109,7 +111,7 @@ def load_crystal(path):
 
     return crystal
 
-class GrapheneCrystal:
+class GrapheneCrystal(LloydHybrid):
     '''
     Create a polycrystalline graphene structure based on the Voronoi diagram
     Attributes:
@@ -155,7 +157,7 @@ class GrapheneCrystal:
 
         return boundary_mask
     
-    def relaxation(self, generators, boundary_mask, n_iter = 100, tol = 1e-4):
+    def relaxation_CPU(self, generators, boundary_mask, n_iter = 100, tol = 1e-4):
         '''
         Minimize the distance between the generators and the centroids of their Voronoi cells using Lloyd's algorithm
         Inputs:
@@ -196,7 +198,7 @@ class GrapheneCrystal:
 
             if delta < tol:
                 return generators_relax
-            
+
         return generators_relax
 
     def vertices_from_generators(self, generators):
@@ -251,7 +253,7 @@ class GrapheneCrystal:
 
         return atoms, bonds
     
-    def build_polycrystal(self, a_CC = 1.42, margin = 10, n_iter = 100, tol = 1e-4):
+    def build_polycrystal(self, a_CC = 1.42, margin = 10, n_iter = 50, tol = 0.1):
         '''
         Build the polycrystalline graphene structure
         Inputs:
@@ -261,7 +263,6 @@ class GrapheneCrystal:
             tol : tolerance for convergence of relaxation
         '''
         base_lattice = generate_triangular_lattice(self.L, a_CC)
-
         all_generators = []
 
         for grain in range(len(self.all_points)):
@@ -286,7 +287,7 @@ class GrapheneCrystal:
 
             rot_atoms = rot_atoms[mask]
 
-            inside = contains(polygon, rot_atoms[:, 0], rot_atoms[:, 1])
+            inside = contains_xy(polygon, rot_atoms[:, 0], rot_atoms[:, 1])
             all_generators.append(rot_atoms[inside])
 
         generators = np.vstack(all_generators)
@@ -297,7 +298,11 @@ class GrapheneCrystal:
 
         boundary_mask = self.get_boundary_mask(generators, margin)
 
-        self.relaxed_generators = self.relaxation(generators, boundary_mask, n_iter, tol)
+        if torch.cuda.is_available():
+            self.relaxed_generators = self.relaxation_GPU(generators, boundary_mask, n_iter=n_iter, tol=tol)
+        else:
+            print("Using CPU for relaxation.")
+            self.relaxed_generators = self.relaxation_CPU(generators, boundary_mask, n_iter=n_iter, tol=tol)
 
         self.atoms, self.bonds = self.vertices_from_generators(self.relaxed_generators)
 
@@ -319,8 +324,12 @@ class GrapheneCrystal:
         return bin_centers, G6
 
     def plot_atoms(self):
-        plt.figure(figsize=(6,6))
-        plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=1, color='black')
+        fig_size = max(4, min(20, self.L / 30))
+        plt.figure(figsize=(fig_size, fig_size))
+
+        dot_size = max(0.5, 500 / self.L**2)
+
+        plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
         plt.xlim(0, self.L)
         plt.ylim(0, self.L)
         plt.gca().set_aspect('equal')
@@ -330,9 +339,13 @@ class GrapheneCrystal:
         plt.tight_layout()
 
     def plot_bonds(self):
-        plt.figure(figsize=(6,6))
+        fig_size = max(4, min(20, self.L / 30))
+        plt.figure(figsize=(fig_size, fig_size))
+
+        lw = max(0.2, 5 / self.L)
+
         lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
-        lc = LineCollection(lines, colors='black', linewidths=0.5)
+        lc = LineCollection(lines, colors='black', linewidths=lw)
         plt.gca().add_collection(lc)
         plt.xlim(0, self.L)
         plt.ylim(0, self.L)
@@ -353,3 +366,36 @@ class GrapheneCrystal:
             L = np.array([self.L]),
             rho = np.array([self.lattice.rho]),
         )
+
+if __name__ == "__main__":
+    import time
+
+    _ = generate_triangular_lattice(10.0)
+
+    configs = [
+        (200,  0.0003,  "12 grains / 200Å  — test de base"),
+        (500,  0.0003,  "75 grains / 500Å  — polycristal moyen"),
+        (500,  0.001,   "250 grains / 500Å — grains plus petits"),
+        (1000, 0.0003,  "300 grains / 1000Å — grande boîte"),
+        (1000, 0.001,   "1000 grains / 1000Å — haute densité"),
+    ]
+
+    for L, rho, desc in configs:
+        print(f"\n{'─'*55}")
+        print(f"  {desc}")
+        print(f"{'─'*55}")
+
+        vor = PeriodicVoronoi(L, rho)
+
+        crystal = GrapheneCrystal(vor)
+
+        crystal.plot_atoms()
+        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_atoms.png", dpi=300)
+        plt.close()
+        crystal.plot_bonds()
+        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_bonds.png", dpi=300)
+        plt.close()
+
+
+        print(f"  Grains   : {vor.N}")
+        print(f"  Atomes   : {len(crystal.atoms):,}")
