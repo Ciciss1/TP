@@ -1,7 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
-from scipy.interpolate import make_interp_spline
 from pathlib import Path
 from Graphene import GrapheneCrystal, load_crystal
 

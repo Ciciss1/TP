@@ -6,48 +6,39 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from numba import njit
 from shapely.geometry import Polygon
-from shapely.vectorized import contains
-from scipy.spatial import cKDTree
-from collections import defaultdict
+from shapely import contains_xy
+from scipy.spatial import Voronoi, cKDTree
+import torch
 
 import Observables as obs
 from Voronoi import PeriodicVoronoi
+from Lloyd_GPU import LloydHybrid
 
 @njit
-def generate_graphene_lattice(L, a_CC = 1.42):
+def generate_triangular_lattice(L, a_CC = 1.42):
     '''
-    Generate a graphene lattice with lattice constant a
+    Generate a triangular lattice with lattice constant a
     Inputs:
         L : size of the box
         a_CC : carbon-carbon bond length
     Outputs:
-        atoms : coordinates of the atoms in the graphene lattice
+        atoms : coordinates of the atoms in the triangular lattice
     '''
     a = a_CC * np.sqrt(3)
-
     a1 = np.array([a, 0])
-    a2 = np.array([a/2, a*np.sqrt(3)/2])
+    a2 = np.array([a * 0.5, a * np.sqrt(3) * 0.5])
 
-    bA = np.array([0, 0])
-    bB = np.array([a/2, a*np.sqrt(3)/6])
-
-    nmax = int(L / a) + 3
-
-    atoms = np.empty((8 * nmax**2, 2), dtype=np.float64)
-
+    nmax = int(L / a) + 5
+    buf = np.empty((16 * nmax**2, 2), dtype=np.float64)
     idx = 0
 
     for i in range(-nmax, nmax):
         for j in range(-nmax, nmax):
             r = i * a1 + j * a2
-
-            atoms[idx] = r + bA
+            buf[idx] = r
             idx += 1
-            atoms[idx] = r + bB
-            idx += 1
-
-    atoms = atoms[:idx]
-    return atoms
+    atoms = buf[:idx]
+    return atoms    
 
 @njit
 def rotate_and_move_atoms(atoms, theta, center):
@@ -114,13 +105,13 @@ def load_crystal(path):
     crystal.points = vor.points
     crystal.theta = vor.theta
 
-    crystal.atoms = data['atoms']
-    crystal.bonds = crystal.build_graphene_bonds()
+    crystal.relaxed_generators = data['relaxed_generators']
+    crystal.atoms, crystal.bonds = crystal.vertices_from_generators(crystal.relaxed_generators)
     crystal.neighbors = compute_neighbors(crystal.atoms, crystal.bonds)
 
     return crystal
 
-class GrapheneCrystal:
+class GrapheneCrystal(LloydHybrid):
     '''
     Create a polycrystalline graphene structure based on the Voronoi diagram
     Attributes:
@@ -143,142 +134,136 @@ class GrapheneCrystal:
         self.theta = voronoi.theta
         self.build_polycrystal(a)
 
-    def remove_close_atoms(self, min_dist):
+    def get_boundary_mask(self, generators, margin = 10):
         '''
-        Remove atoms that are closer than min_dist to each other
+        Identify generators that are close to the grains boundaries
         Inputs:
-            min_dist : minimum distance between atoms
+            generators : coordinates of the generators
+            margin : distance from the boundary
+        Outputs:
+            boundary_mask : boolean mask
         '''
-        tree = cKDTree(self.atoms)
-        pairs = tree.query_pairs(min_dist)
+        tree = cKDTree(generators)
+        boundary_mask = np.zeros(len(generators), dtype=bool)
 
-        to_remove = set()
-        for i, j in pairs:
-            if j in to_remove or i in to_remove:
-                continue
-            to_remove.add(j)
+        for v1, v2 in zip(self.lattice.ridge_v1, self.lattice.ridge_v2):
+            edge_len = np.linalg.norm(v2 - v1)
+            n_samples = max(2, int(edge_len / (1.42 * 0.5)))
+            for t in np.linspace(0, 1, n_samples):
+                pt = v1 * (1 - t) + v2 * t
+                idxs = tree.query_ball_point(pt, margin)
+                for idx in idxs:
+                    boundary_mask[idx] = True
 
-        mask = np.ones(len(self.atoms), dtype=bool)
-        mask[list(to_remove)] = False
-        self.atoms = self.atoms[mask]
-
-    def build_graphene_bonds(self, a = 1.42, max_bonds = 3):
-        '''
-        Build the bonds between atoms based on their distances and ensure that each atom has at most 3 bonds
-        Inputs:
-            a : carbon-carbon bond length
-            max_bonds : maximum number of bonds per atom
-        '''
-        tree = cKDTree(self.atoms)
-        raw_pairs = np.array(list(tree.query_pairs(a * 1.2)))
-
-        if len(raw_pairs) == 0:
-            self.bonds = np.empty((0, 2), dtype=np.int64)
-            return
-        
-        diff = self.atoms[raw_pairs[:, 0]] - self.atoms[raw_pairs[:, 1]]
-        dists = np.hypot(diff[:, 0], diff[:, 1])
-        mask = (dists >= a * 0.8) & (dists <= a * 1.2)
-        self.bonds = raw_pairs[mask]
-
-        bond_count = np.zeros(len(self.atoms), dtype=np.int64)
-        for i, j in self.bonds:
-            bond_count[i] += 1
-            bond_count[j] += 1
-
-        overcoordinated = np.where(bond_count > max_bonds)[0]
-        
-        while len(overcoordinated) > 0:
-            neighbors_dict = defaultdict(list)
-            for i, j in self.bonds:
-                neighbors_dict[i].append(j)
-                neighbors_dict[j].append(i)
-
-            to_remove = set()
-
-            for idx in overcoordinated:
-                if idx in to_remove:
-                    continue
-
-                if bond_count[idx] <= max_bonds:
-                    continue
-                
-                candidates = [idx] + neighbors_dict[idx]
-                worst = max(candidates, key=lambda x: bond_count[x])
-                to_remove.add(worst)
-
-                bond_count[worst] = 0
-                for neighbor in neighbors_dict[worst]:
-                    bond_count[neighbor] -= 1
-                
-            mask = np.ones(len(self.atoms), dtype=bool)
-            mask[list(to_remove)] = False
-            self.atoms = self.atoms[mask]
-
-            new_index = np.full(len(mask), -1, dtype=np.int64)
-            new_index[mask] = np.arange(np.sum(mask))
-
-            new_bonds = []
-            for i, j in self.bonds:
-                if mask[i] and mask[j]:
-                    new_bonds.append((new_index[i], new_index[j]))
-
-            self.bonds = np.array(new_bonds)
-
-            bond_count = np.zeros(len(self.atoms), dtype=np.int64)
-            for i, j in self.bonds:
-                bond_count[i] += 1
-                bond_count[j] += 1
-            overcoordinated = np.where(bond_count > max_bonds)[0]
-        
-        bond_count = np.zeros(len(self.atoms), dtype=np.int64)
-        for i, j in self.bonds:
-            bond_count[i] += 1
-            bond_count[j] += 1
-        undercoordinated = np.where(bond_count < max_bonds)[0]
-        max_bond_length = a * 1.7
-
-        tree = cKDTree(self.atoms)
-        bonds_set = set(tuple(sorted((i, j))) for i, j in self.bonds)
-        new_bonds = list(self.bonds)
-
-        while len(undercoordinated) > 0:
-            made_any = False
-            for idx in undercoordinated:
-                if bond_count[idx] >= max_bonds:
-                    continue
-
-                neighbors = tree.query_ball_point(self.atoms[idx], max_bond_length)
-                neighbors = [n for n in neighbors if n != idx and bond_count[n] < max_bonds and tuple(sorted((idx, n))) not in bonds_set]
-                if not neighbors:
-                    continue
-
-                nearest = min(neighbors, key=lambda n: np.linalg.norm(self.atoms[idx] - self.atoms[n]))
-
-                bond_key = tuple(sorted((idx, nearest)))
-                bonds_set.add(bond_key)
-                new_bonds.append(bond_key)
-                bond_count[idx] += 1
-                bond_count[nearest] += 1
-                made_any = True
-
-            if not made_any:
-                break
-
-            undercoordinated = np.where(bond_count < max_bonds)[0]
-
-        self.bonds = np.array(new_bonds)
+        return boundary_mask
     
-    def build_polycrystal(self, a = 1.42):
+    def relaxation_CPU(self, generators, boundary_mask, n_iter = 100, tol = 1e-4):
+        '''
+        Minimize the distance between the generators and the centroids of their Voronoi cells using Lloyd's algorithm
+        Inputs:
+            generators : coordinates of the generators
+            boundary_mask : boolean mask indicating which generators are close to the boundaries
+            n_iter : maximum number of iterations
+            tol : tolerance for convergence
+        Outputs:
+            relaxed_generators : coordinates of the relaxed generators
+        '''
+        generators_relax = generators.copy()
+        free_idx = np.where(boundary_mask)[0]
+        L = self.L
+
+        for it in range(n_iter):
+            images = [generators_relax + np.array([dx, dy]) 
+                        for dx in [-L, 0, L]
+                        for dy in [-L, 0, L]]
+            all_gen = np.vstack(images)
+            M = len(generators_relax)
+            vor = Voronoi(all_gen)
+
+            new_positions = generators_relax.copy()
+            point_region = np.array(vor.point_region)
+
+            for idx in free_idx:
+                region = vor.regions[point_region[idx + 4*M]]
+
+                if -1 in region or len(region) == 0:
+                    continue
+
+                poly = Polygon(vor.vertices[region])
+                centroid = np.array(poly.centroid.coords[0])
+                new_positions[idx] = centroid % L
+
+            delta = np.max(np.linalg.norm(new_positions[free_idx] - generators_relax[free_idx], axis=1))
+            generators_relax = new_positions
+
+            if delta < tol:
+                return generators_relax
+
+        return generators_relax
+
+    def vertices_from_generators(self, generators):
+        '''
+        Compute the vertices of the Voronoi diagram from the generators
+        Inputs:
+            generators : coordinates of the generators
+        Outputs:
+            vertices : coordinates of the atoms in the graphene lattice
+        '''
+
+        images = [generators + np.array([dx, dy]) 
+                    for dx in [-self.L, 0, self.L]
+                    for dy in [-self.L, 0, self.L]]
+        all_gen = np.vstack(images)
+        M = len(generators)
+        vor = Voronoi(all_gen)
+
+        vertex_indices = set()
+        for all_idx in range(4*M, 5*M):
+            region = vor.regions[vor.point_region[all_idx]]
+            if -1 in region or len(region) == 0:
+                continue
+            vertex_indices.update(region)
+
+        vertex_list = sorted(vertex_indices)
+        old_to_new = {old: new for new, old in enumerate(vertex_list)}
+        atoms = vor.vertices[vertex_list]
+
+        bonds = []
+        for (vi, vj) in vor.ridge_vertices:
+            if vi == -1 or vj == -1:
+                continue
+            
+            if vi not in old_to_new or vj not in old_to_new:
+                continue
+
+            bonds.append((old_to_new[vi], old_to_new[vj]))
+
+        bonds = np.array(bonds, dtype=np.int64)
+
+        mask = (atoms[:, 0] >= 0) & (atoms[:, 0] <= self.L) & (atoms[:, 1] >= 0) & (atoms[:, 1] <= self.L)
+
+        bond_mask = mask[bonds[:, 0]] & mask[bonds[:, 1]]
+        bonds = bonds[bond_mask]
+        new_indices = np.full(len(atoms), -1, dtype=np.int64)
+        new_indices[mask] = np.arange(np.sum(mask))
+        bonds = new_indices[bonds]
+        bonds = bonds[(bonds[:, 0] >= 0) & (bonds[:, 1] >= 0)]
+
+        atoms = atoms[mask]
+
+        return atoms, bonds
+    
+    def build_polycrystal(self, a_CC = 1.42, margin = 10, n_iter = 50, tol = 0.1):
         '''
         Build the polycrystalline graphene structure
         Inputs:
-            a : carbon-carbon bond length
+            a_CC : carbon-carbon bond length
+            margin : distance from the grain boundaries
+            n_iter : maximum number of iterations for relaxation
+            tol : tolerance for convergence of relaxation
         '''
-        
-        base_lattice = generate_graphene_lattice(self.L, a)
-
-        all_atoms = []
+        base_lattice = generate_triangular_lattice(self.L, a_CC)
+        all_generators = []
 
         for grain in range(len(self.all_points)):
             region_idx = self.vor.point_region[grain]
@@ -287,7 +272,7 @@ class GrapheneCrystal:
             if -1 in vertices or len(vertices) == 0:
                 continue
 
-            polygon = Polygon(self.vor.vertices[vertices]).buffer(a * 0.5)
+            polygon = Polygon(self.vor.vertices[vertices]).buffer(0.1)
 
             min_x, min_y, max_x, max_y = polygon.bounds
             if (max_x < 0 or min_x > self.L or max_y < 0 or min_y > self.L):
@@ -302,28 +287,29 @@ class GrapheneCrystal:
 
             rot_atoms = rot_atoms[mask]
 
-            inside = contains(polygon, rot_atoms[:, 0], rot_atoms[:, 1])
-            all_atoms.append(rot_atoms[inside])
+            inside = contains_xy(polygon, rot_atoms[:, 0], rot_atoms[:, 1])
+            all_generators.append(rot_atoms[inside])
 
-        self.atoms = np.vstack(all_atoms)
+        generators = np.vstack(all_generators)
 
-        mask = (self.atoms[:, 0] >= 0) & (self.atoms[:, 0] <= self.L) & (self.atoms[:, 1] >= 0) & (self.atoms[:, 1] <= self.L)
-        self.atoms = self.atoms[mask]
-        
-        self.remove_close_atoms(a * 0.8)
-        self.build_graphene_bonds()
+        mask = (generators[:, 0] >= 0) & (generators[:, 0] <= self.L) & (generators[:, 1] >= 0) & (generators[:, 1] <= self.L)
+
+        generators = generators[mask]
+
+        boundary_mask = self.get_boundary_mask(generators, margin)
+
+        if torch.cuda.is_available():
+            self.relaxed_generators = self.relaxation_GPU(generators, boundary_mask, n_iter=n_iter, tol=tol)
+        else:
+            print("Using CPU for relaxation.")
+            self.relaxed_generators = self.relaxation_CPU(generators, boundary_mask, n_iter=n_iter, tol=tol)
+
+        self.atoms, self.bonds = self.vertices_from_generators(self.relaxed_generators)
+
         self.neighbors = compute_neighbors(self.atoms, self.bonds)
 
         del self.vor
         del self.all_points
-
-    def compute_grain_mask(self):
-        '''
-        Compute a mask indicating which grain each atom belongs to
-        '''
-        tree = cKDTree(self.points)
-        _, grain_mask = tree.query(self.atoms)
-        return grain_mask.astype(np.int32)
 
     def compute_observables(self, bin_bounds=None):
         '''
@@ -338,8 +324,12 @@ class GrapheneCrystal:
         return bin_centers, G6
 
     def plot_atoms(self):
-        plt.figure(figsize=(6,6))
-        plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=1, color='black')
+        fig_size = max(4, min(20, self.L / 30))
+        plt.figure(figsize=(fig_size, fig_size))
+
+        dot_size = max(0.5, 500 / self.L**2)
+
+        plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
         plt.xlim(0, self.L)
         plt.ylim(0, self.L)
         plt.gca().set_aspect('equal')
@@ -349,9 +339,13 @@ class GrapheneCrystal:
         plt.tight_layout()
 
     def plot_bonds(self):
-        plt.figure(figsize=(6,6))
+        fig_size = max(4, min(20, self.L / 30))
+        plt.figure(figsize=(fig_size, fig_size))
+
+        lw = max(0.2, 5 / self.L)
+
         lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
-        lc = LineCollection(lines, colors='black', linewidths=0.5)
+        lc = LineCollection(lines, colors='black', linewidths=lw)
         plt.gca().add_collection(lc)
         plt.xlim(0, self.L)
         plt.ylim(0, self.L)
@@ -366,9 +360,42 @@ class GrapheneCrystal:
             os.makedirs(os.path.dirname(path))
         np.savez_compressed(
             path,
-            atoms = self.atoms,
+            relaxed_generators = self.relaxed_generators,
             points = self.points,
             theta = self.theta,
             L = np.array([self.L]),
             rho = np.array([self.lattice.rho]),
         )
+
+if __name__ == "__main__":
+    import time
+
+    _ = generate_triangular_lattice(10.0)
+
+    configs = [
+        (200,  0.0003,  "12 grains / 200Å  — test de base"),
+        (500,  0.0003,  "75 grains / 500Å  — polycristal moyen"),
+        (500,  0.001,   "250 grains / 500Å — grains plus petits"),
+        (1000, 0.0003,  "300 grains / 1000Å — grande boîte"),
+        (1000, 0.001,   "1000 grains / 1000Å — haute densité"),
+    ]
+
+    for L, rho, desc in configs:
+        print(f"\n{'─'*55}")
+        print(f"  {desc}")
+        print(f"{'─'*55}")
+
+        vor = PeriodicVoronoi(L, rho)
+
+        crystal = GrapheneCrystal(vor)
+
+        crystal.plot_atoms()
+        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_atoms.png", dpi=300)
+        plt.close()
+        crystal.plot_bonds()
+        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_bonds.png", dpi=300)
+        plt.close()
+
+
+        print(f"  Grains   : {vor.N}")
+        print(f"  Atomes   : {len(crystal.atoms):,}")
