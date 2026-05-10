@@ -1,5 +1,6 @@
 import time
 import numpy as np
+from shapely.geometry import Polygon
 import torch
 from scipy.spatial import Voronoi
 
@@ -7,9 +8,6 @@ def get_device() -> torch.device:
     if torch.cuda.is_available():
         dev = torch.device("cuda")
         props = torch.cuda.get_device_properties(0)
-        print(f"Using GPU: {props.name} | "
-                f"Memory: {props.total_memory / 1e9:.2f} GB | "
-                f"SM : {props.multi_processor_count}")
         return dev
     print("Using CPU")
     return torch.device("cpu")
@@ -208,3 +206,47 @@ class LloydHybrid:
         device = get_device()
         
         return lloyd_hybrid(generators, boundary_mask, self.L, n_iter, tol, device)
+    
+    def relaxation_CPU(self, generators, boundary_mask, n_iter = 100, tol = 1e-4):
+        '''
+        Minimize the distance between the generators and the centroids of their Voronoi cells using Lloyd's algorithm
+        Inputs:
+            generators : coordinates of the generators
+            boundary_mask : boolean mask indicating which generators are close to the boundaries
+            n_iter : maximum number of iterations
+            tol : tolerance for convergence
+        Outputs:
+            relaxed_generators : coordinates of the relaxed generators
+        '''
+        generators_relax = generators.copy()
+        free_idx = np.where(boundary_mask)[0]
+        L = self.L
+
+        for it in range(n_iter):
+            images = [generators_relax + np.array([dx, dy]) 
+                        for dx in [-L, 0, L]
+                        for dy in [-L, 0, L]]
+            all_gen = np.vstack(images)
+            M = len(generators_relax)
+            vor = Voronoi(all_gen)
+
+            new_positions = generators_relax.copy()
+            point_region = np.array(vor.point_region)
+
+            for idx in free_idx:
+                region = vor.regions[point_region[idx + 4*M]]
+
+                if -1 in region or len(region) == 0:
+                    continue
+
+                poly = Polygon(vor.vertices[region])
+                centroid = np.array(poly.centroid.coords[0])
+                new_positions[idx] = centroid % L
+
+            delta = np.max(np.linalg.norm(new_positions[free_idx] - generators_relax[free_idx], axis=1))
+            generators_relax = new_positions
+
+            if delta < tol:
+                return generators_relax
+
+        return generators_relax

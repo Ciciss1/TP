@@ -1,9 +1,11 @@
 import sys
 sys.path.insert(0, "TP2/Simulation")
 import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+
 from numba import njit
 from shapely.geometry import Polygon
 from shapely import contains_xy
@@ -13,6 +15,7 @@ import torch
 import Observables as obs
 from Voronoi import PeriodicVoronoi
 from Lloyd_GPU import LloydHybrid
+from CG_Relaxation import CGRelaxation
 
 @njit
 def generate_triangular_lattice(L, a_CC = 1.42):
@@ -111,7 +114,7 @@ def load_crystal(path):
 
     return crystal
 
-class GrapheneCrystal(LloydHybrid):
+class GrapheneCrystal(LloydHybrid, CGRelaxation):
     '''
     Create a polycrystalline graphene structure based on the Voronoi diagram
     Attributes:
@@ -134,7 +137,7 @@ class GrapheneCrystal(LloydHybrid):
         self.theta = voronoi.theta
         self.build_polycrystal(a)
 
-    def get_boundary_mask(self, generators, margin = 10):
+    def get_boundary_mask(self, generators, margin = 5):
         '''
         Identify generators that are close to the grains boundaries
         Inputs:
@@ -156,50 +159,6 @@ class GrapheneCrystal(LloydHybrid):
                     boundary_mask[idx] = True
 
         return boundary_mask
-    
-    def relaxation_CPU(self, generators, boundary_mask, n_iter = 100, tol = 1e-4):
-        '''
-        Minimize the distance between the generators and the centroids of their Voronoi cells using Lloyd's algorithm
-        Inputs:
-            generators : coordinates of the generators
-            boundary_mask : boolean mask indicating which generators are close to the boundaries
-            n_iter : maximum number of iterations
-            tol : tolerance for convergence
-        Outputs:
-            relaxed_generators : coordinates of the relaxed generators
-        '''
-        generators_relax = generators.copy()
-        free_idx = np.where(boundary_mask)[0]
-        L = self.L
-
-        for it in range(n_iter):
-            images = [generators_relax + np.array([dx, dy]) 
-                        for dx in [-L, 0, L]
-                        for dy in [-L, 0, L]]
-            all_gen = np.vstack(images)
-            M = len(generators_relax)
-            vor = Voronoi(all_gen)
-
-            new_positions = generators_relax.copy()
-            point_region = np.array(vor.point_region)
-
-            for idx in free_idx:
-                region = vor.regions[point_region[idx + 4*M]]
-
-                if -1 in region or len(region) == 0:
-                    continue
-
-                poly = Polygon(vor.vertices[region])
-                centroid = np.array(poly.centroid.coords[0])
-                new_positions[idx] = centroid % L
-
-            delta = np.max(np.linalg.norm(new_positions[free_idx] - generators_relax[free_idx], axis=1))
-            generators_relax = new_positions
-
-            if delta < tol:
-                return generators_relax
-
-        return generators_relax
 
     def vertices_from_generators(self, generators):
         '''
@@ -253,7 +212,7 @@ class GrapheneCrystal(LloydHybrid):
 
         return atoms, bonds
     
-    def build_polycrystal(self, a_CC = 1.42, margin = 10, n_iter = 50, tol = 0.1):
+    def build_polycrystal(self, a_CC = 1.42, margin = 5, n_iter = 50, tol = 0.1):
         '''
         Build the polycrystalline graphene structure
         Inputs:
@@ -262,9 +221,11 @@ class GrapheneCrystal(LloydHybrid):
             n_iter : maximum number of iterations for relaxation
             tol : tolerance for convergence of relaxation
         '''
+        # Generate base Lattice
         base_lattice = generate_triangular_lattice(self.L, a_CC)
         all_generators = []
 
+        # Construct the generators for each grain by rotating and moving the base lattice
         for grain in range(len(self.all_points)):
             region_idx = self.vor.point_region[grain]
             vertices = self.vor.regions[region_idx]
@@ -292,20 +253,33 @@ class GrapheneCrystal(LloydHybrid):
 
         generators = np.vstack(all_generators)
 
+        # Keep only generators that are within the box
         mask = (generators[:, 0] >= 0) & (generators[:, 0] <= self.L) & (generators[:, 1] >= 0) & (generators[:, 1] <= self.L)
 
         generators = generators[mask]
 
         boundary_mask = self.get_boundary_mask(generators, margin)
 
+        # Relax the generators using Lloyd's algorithm
         if torch.cuda.is_available():
             self.relaxed_generators = self.relaxation_GPU(generators, boundary_mask, n_iter=n_iter, tol=tol)
         else:
             print("Using CPU for relaxation.")
             self.relaxed_generators = self.relaxation_CPU(generators, boundary_mask, n_iter=n_iter, tol=tol)
 
+        # Construct the atoms and bonds from the relaxed generators
         self.atoms, self.bonds = self.vertices_from_generators(self.relaxed_generators)
 
+        # Relax the atoms using LAMMPS
+        self.atoms = self.relaxation_CG(
+            atoms=self.atoms,
+            generators=self.relaxed_generators,
+            generator_boundary_mask=boundary_mask,
+            ftol=0.1,
+            max_steps=100,
+        )
+
+        # Compute the neighbors for each atom
         self.neighbors = compute_neighbors(self.atoms, self.bonds)
 
         del self.vor
@@ -374,16 +348,18 @@ if __name__ == "__main__":
 
     configs = [
         (200,  0.0003,  "12 grains / 200Å  — test de base"),
-        (500,  0.0003,  "75 grains / 500Å  — polycristal moyen"),
-        (500,  0.001,   "250 grains / 500Å — grains plus petits"),
-        (1000, 0.0003,  "300 grains / 1000Å — grande boîte"),
-        (1000, 0.001,   "1000 grains / 1000Å — haute densité"),
+        # (500,  0.0003,  "75 grains / 500Å  — polycristal moyen"),
+        # (500,  0.001,   "250 grains / 500Å — grains plus petits"),
+        # (1000, 0.0003,  "300 grains / 1000Å — grande boîte"),
+        # (1000, 0.001,   "1000 grains / 1000Å — haute densité"),
     ]
 
     for L, rho, desc in configs:
         print(f"\n{'─'*55}")
         print(f"  {desc}")
         print(f"{'─'*55}")
+
+        t0 = time.time()
 
         vor = PeriodicVoronoi(L, rho)
 
@@ -397,5 +373,7 @@ if __name__ == "__main__":
         plt.close()
 
 
+        t1 = time.time()
         print(f"  Grains   : {vor.N}")
         print(f"  Atomes   : {len(crystal.atoms):,}")
+        print(f"  Temps    : {t1 - t0:.2f} s")
