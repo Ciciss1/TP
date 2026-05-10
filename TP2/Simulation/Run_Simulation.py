@@ -1,128 +1,111 @@
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import sys
+import time
+import numpy as np
 from tqdm import tqdm
 
 from Voronoi import PeriodicVoronoi
 from MonteCarlo import monte_carlo
 from Graphene import GrapheneCrystal, load_crystal
-from Run_anneal import run_anneal
 
-def run_simulation(args):
+def w(message = ""):
+    tqdm.write(message)
+
+def run_one_temp(args, outer_bar: tqdm):
     T, L, epsilon, rho, alpha, beta_RS, n_monte_carlo, output_dir = args
-    output_dir = os.path.join(output_dir, f"eps_{epsilon}/L_{L}/rho_{rho}/T_{T}/")
-    os.makedirs(output_dir, exist_ok=True)
 
+    sim_dir = os.path.join(output_dir, f"eps_{epsilon}/L_{L}/rho_{rho}/T_{T}/")
+    os.makedirs(sim_dir, exist_ok=True)
+
+    outer_bar.set_postfix_str(f"T={T}  1/3 Voronoi")
+    t0 = time.perf_counter()
     vor = PeriodicVoronoi(L, rho)
+    w(f"  [T={T:<5}]  Voronoi  {vor.N} grains  {time.perf_counter() - t0:5.2f} s")
 
-    thetas, _ = monte_carlo(
-                    vor.theta,
-                    vor.adj_i,
-                    vor.adj_j,
-                    vor.adj_length,
-                    1/T,
-                    epsilon,
-                    rho,
-                    alpha,
-                    beta_RS,
-                    n_monte_carlo,
-                    use_tqdm=False
+    outer_bar.set_postfix_str(f"T={T}  2/3 Monte Carlo")
+    t0 = time.perf_counter()
+
+    thetas, energy_history = monte_carlo(
+        vor.theta, vor.adj_i, vor.adj_j, vor.adj_length,
+        beta=1.0 / T, epsilon=epsilon, rho=rho,
+        alpha=alpha, beta_RS=beta_RS,
+        n_sweeps=n_monte_carlo, use_tqdm=False,
     )
 
     vor.theta = thetas
+    w(f"  [T={T:<5}]  Monte Carlo  E={energy_history[-1]:+.4f} eV   {time.perf_counter()-t0:5.2f}s")
 
-    initial_crystal = GrapheneCrystal(vor)
+    outer_bar.set_postfix_str(f"T={T}  3/3 Crystal")
+    t0 = time.perf_counter()
+    crystal = GrapheneCrystal(vor)
+    w(f"  [T={T:<5}]  Crystal      {len(crystal.atoms)} atoms          {time.perf_counter()-t0:5.2f}s")
+    
+    save_path = os.path.join(sim_dir, "Crystal.npz")
+    crystal.save_crystal(save_path)
+    w(f"  [T={T:<5}]  Saved  →  {save_path}")
 
-    initial_crystal.save_crystal(os.path.join(output_dir, "final_crystal.npz"))
-
-if __name__ == "__main__":
+def load_parameters(path):
     params = {}
-    with open("parameters.txt") as f:
+    with open(path, "r") as f:
         exec(f.read(), {}, params)
 
-    core = params["core"]
-    multi_threading = params["multi_threading"]
+    required_keys = [
+        "output_dir",
+        "epsilon",
+        "alpha",
+        "beta_RS",
+        "L",
+        "rho",
+        "n_monte_carlo",
+        "T"
+    ]
 
+    missing_keys = [key for key in required_keys if key not in params]
+    if missing_keys:
+        raise KeyError(f"Missing required parameters: {missing_keys}")
+    
+    T_raw = params["T"]
+    if isinstance(T_raw, (int, float)):
+        params["T"] = [float(T_raw)]
+    else:
+        params["T"] = list(T_raw)
+
+    return params
+
+def main():
+    param_file = sys.argv[1] if len(sys.argv) > 1 else "parameters.txt"
+
+    params = load_parameters(param_file)
+
+    output_dir = params["output_dir"]
     epsilon = params["epsilon"]
     alpha = params["alpha"]
     beta_RS = params["beta_RS"]
-    Ts = params["T"]
-
     L = params["L"]
     rho = params["rho"]
     n_monte_carlo = params["n_monte_carlo"]
+    Ts = params["T"]
 
-    run_anneal_bool = params["run_anneal_bool"]
-    unfreeze_dist = params["unfreeze_dist"]
-    T_start = params["T_start"]
-    T_end = params["T_end"]
-    n_anneal = params["n_anneal"]
-    n_min = params["n_min"]
-    damping = params["damping"]
-    dump_every = params["dump_every"]
-    n_quench = params["n_quench"]
-    n_iter = params["n_iter"]
+    os.makedirs(output_dir, exist_ok=True)
 
-    if multi_threading:
-        n_workers = min(core, len(Ts))
+    w(f"  param file: {param_file}")
+    w(f"  output dir: {output_dir}")
+    w(f"  epsilon: {epsilon}  alpha: {alpha}  beta_RS: {beta_RS}  L: {L}  rho: {rho}  n_MC: {n_monte_carlo}  T: {Ts}")
 
-        with ProcessPoolExecutor(max_workers=n_workers) as executor:
-            futures = []
+    t_total = time.perf_counter()
 
-            for T in Ts:
-                futures.append(executor.submit(
-                    run_simulation,
-                    (T, L, epsilon, rho, alpha, beta_RS, n_monte_carlo, params["output_dir"])
-                ))
-
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Simulations"):
-                future.result()  
-
-    else:
-        for T in Ts:
-
-            output_dir = params["output_dir"]
-            output_dir = os.path.join(output_dir, f"eps_{epsilon}/L_{L}/rho_{rho}/T_{T}/")
-            os.makedirs(output_dir, exist_ok=True)
-
-            print("Creating Voronoi lattice...")
-
-            vor = PeriodicVoronoi(L, rho)
-
-            thetas, _ = monte_carlo(
-                            vor.theta,
-                            vor.adj_i,
-                            vor.adj_j,
-                            vor.adj_length,
-                            1/T,
-                            epsilon,
-                            rho,
-                            alpha,
-                            beta_RS,
-                            n_monte_carlo,
+    with tqdm(Ts, desc="  Progress", unit="T", position=0, leave=True, dynamic_ncols=True, colour = "blue") as outer_bar: 
+        
+        for T in outer_bar:
+            t_sim = time.perf_counter()
+            
+            run_one_temp(
+                (T, L, epsilon, rho, alpha, beta_RS, n_monte_carlo, output_dir),
+                outer_bar
             )
+            w(f"  [T={T:<5}]  ✓ done in {time.perf_counter()-t_sim:.1f}s\n")
 
-            vor.theta = thetas
+    print(f"\n  All done — {time.perf_counter()-t_total:.1f}s total\n")
 
-            print("Creating graphene crystal...")
-
-            initial_crystal = GrapheneCrystal(vor)
-
-            if run_anneal_bool:
-                
-                initial_crystal.save_crystal(os.path.join(output_dir, "initial_crystal.npz"))
-
-                run_anneal(
-                    unfreeze_dist,
-                    T_start,
-                    T_end,
-                    n_anneal,
-                    n_min,
-                    damping,
-                    dump_every,
-                    n_quench,
-                    n_iter,
-                    out_dir = output_dir
-                )
-            else:
-                print("Skipping annealing step")
-                initial_crystal.save_crystal(os.path.join(output_dir, "final_crystal.npz"))
+if __name__ == "__main__":
+    main()
