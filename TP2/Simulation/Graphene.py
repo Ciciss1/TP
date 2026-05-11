@@ -285,15 +285,17 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
         del self.vor
         del self.all_points
 
-    def compute_observables(self, bin_bounds=None):
+    def compute_observables(self, a = 1.42, n_samples = 5_000_000):
         '''
         Compute the observables for the graphene crystal
         '''
-        if bin_bounds is None:
-            bin_bounds = np.linspace(0, 2 * self.L / 3, 50)
+        r_max = self.L / 2
+        dr = a * np.sqrt(3) / 2
+        num_bins = int(r_max / dr)
+        bin_bounds = np.linspace(0, r_max, num_bins + 1)
         bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
 
-        G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds)
+        G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds, n_samples)
 
         return bin_centers, G6
 
@@ -317,10 +319,12 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
         plt.figure(figsize=(fig_size, fig_size))
 
         lw = max(0.2, 5 / self.L)
+        dot_size = max(0.5, 500 / self.L**2)
 
         lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
         lc = LineCollection(lines, colors='black', linewidths=lw)
         plt.gca().add_collection(lc)
+        plt.scatter(self.relaxed_generators[:, 0], self.relaxed_generators[:, 1], s=dot_size, color='red') 
         plt.xlim(0, self.L)
         plt.ylim(0, self.L)
         plt.gca().set_aspect('equal')
@@ -340,6 +344,9 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
             L = np.array([self.L]),
             rho = np.array([self.lattice.rho]),
         )
+
+
+# Test
 
 if __name__ == "__main__":
     import time

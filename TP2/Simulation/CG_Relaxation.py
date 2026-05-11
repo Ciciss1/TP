@@ -4,7 +4,7 @@ import tempfile
 import numpy as np
 from scipy.spatial import cKDTree
 
-N_TRHEADS = 8
+N_TRHEADS = 6
 Z_VACUUM = 20.0
 C_MASS = 12.011
 
