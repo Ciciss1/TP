@@ -61,7 +61,7 @@ def compute_psi6(i, atoms, neighbors):
     return psi6            
 
 @njit
-def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples = 1_000_000):
+def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples = 5_000_000):
     '''
     Compute the orientational correlation function G6(r) 
     Inputs:
@@ -76,7 +76,8 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples =
     num_bins = len(bin_bounds) - 1
     r_max = bin_bounds[num_bins]
 
-    G6 = np.zeros(num_bins, dtype=np.float64)
+    G6_re = np.zeros(num_bins, dtype=np.float64)
+    G6_im = np.zeros(num_bins, dtype=np.float64)
     count = np.zeros(num_bins, dtype=np.int64)
 
     for _ in range(n_samples):
@@ -96,13 +97,24 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples =
         psi_6_i = compute_psi6(i, coords, neighbors)
         psi_6_j = compute_psi6(j, coords, neighbors)
 
-        G6[b] += psi_6_i.real * psi_6_j.real + psi_6_i.imag * psi_6_j.imag
+        val_re = psi_6_i.real * psi_6_j.real + psi_6_i.imag * psi_6_j.imag
+        val_im = psi_6_i.real * psi_6_j.imag - psi_6_i.imag * psi_6_j.real
+        G6_re[b] += val_re
+        G6_im[b] += val_im 
+
         count[b] += 1
 
+    G6 = np.zeros(num_bins, dtype=np.float64)
     for b in range(num_bins):
         if count[b] > 0:
-            G6[b] /= count[b]
+            mean_re = G6_re[b] / count[b]
+            mean_im = G6_im[b] / count[b]
+
+            G6[b] = np.sqrt(mean_re * mean_re + mean_im * mean_im)
+
+    G6 /= G6[0] if G6[0] > 0 else 1.0
     return G6
+
 
 @njit
 def build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC = 1.42):

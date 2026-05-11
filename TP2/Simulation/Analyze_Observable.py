@@ -26,17 +26,35 @@ def analyze_observable(L, epsilon, rho, results_dir = "results/"):
         T = float(T_dir.name.split("_")[1])
         T_values.append(T)
 
-        final_crystal_path = T_dir / "final_crystal.npz"
-        if not final_crystal_path.exists():
-            raise FileNotFoundError(f"Final crystal file {final_crystal_path} does not exist.")
+        Crystal_path = T_dir / "Crystal.npz"
+        if not Crystal_path.exists():
+            raise FileNotFoundError(f"Crystal file {Crystal_path} does not exist.")
         
-        crystal = load_crystal(final_crystal_path)
-        
+        crystal = load_crystal(Crystal_path)
+
+        voronoi = crystal.lattice
+        voronoi.plot()
+        plt.savefig(T_dir / "Lattice.pdf")
+        plt.close()
+
+        crystal.plot_atoms()
+        plt.savefig(T_dir / "Atoms.pdf")
+        plt.close()
+
+        crystal.plot_bonds()
+        plt.savefig(T_dir / "Bonds.pdf")
+        plt.close()
+
         bin_centers, G6 = crystal.compute_observables()
 
-        
+        a_CC = 1.42
+        r_min = 5 * a_CC * np.sqrt(3) / 2
+        mask_fit = bin_centers >= r_min
 
-        coeffs, cov = curve_fit(power_law, bin_centers, G6, p0=[1, 1/4])
+        x_fit = bin_centers[mask_fit]
+        y_fit = G6[mask_fit]
+
+        coeffs, cov = curve_fit(power_law, x_fit, y_fit, p0=[1, 1/4], bounds=([0, 0], [10, 2]))
         a, b = coeffs  
 
         eta = b
@@ -44,17 +62,29 @@ def analyze_observable(L, epsilon, rho, results_dir = "results/"):
         eta_values.append(eta)
         eta_err_values.append(eta_err)
 
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-        ax.plot(bin_centers, G6, label = r"$G_6(r)$")
-        x_fit = np.linspace(bin_centers.min(), bin_centers.max(), 100)
-        ax.plot(x_fit, power_law(x_fit, *coeffs), label = r"Fit: $G_6(r) \sim r^{-\eta}$", linestyle='--')
-        ax.set_xlabel(r"$r$")
-        ax.set_ylabel(r"$G_6(r)$")
-        ax.set_ylim(-0.05, 1.05)
-        ax.set_title(f"L={L}, epsilon={epsilon}, rho={rho}, T={T}")
-        ax.legend()
-        ax.grid()
+        ax1 = axes[0]
+        ax1.plot(bin_centers, G6, label=r"$G_6(r)$")
+        ax1.plot(x_fit, power_law(x_fit, *coeffs), 'r--', label=f"Fit: $\\eta$={eta:.3f}±{eta_err:.3f}")
+        ax1.set_ylim(-0.05, 1.05)
+        ax1.set_xlabel(r"$r (\AA)$")
+        ax1.set_ylabel(r"$G_6(r)$")
+        ax1.set_title(f"Linear Scale - T={T}")
+        ax1.legend()
+        ax1.grid()
+
+        ax2 = axes[1]
+        ax2.loglog(bin_centers, G6, label=r"$G_6(r)$")
+        ax2.loglog(x_fit, power_law(x_fit, *coeffs), 'r--', label=f"Fit: $\\eta$={eta:.3f}±{eta_err:.3f}")
+        ax2.set_ylim(1e-4, 1.05)
+        ax2.set_xlabel(r"$r (\AA)$")
+        ax2.set_ylabel(r"$G_6(r)$")
+        ax2.set_title(f"Log-Log Scale - T={T}")
+        ax2.legend()
+        ax2.grid()
+
+        fig.suptitle(f"L={L}, epsilon={epsilon}, rho={rho}")
         plt.tight_layout()
         plt.savefig(T_dir / "G6_fit.pdf")
         plt.close()
@@ -67,9 +97,9 @@ def analyze_observable(L, epsilon, rho, results_dir = "results/"):
 
     ax.errorbar(T_values, eta_values, yerr=eta_err_values, fmt='x-', label=r"Extracted $\eta$")
     ax.axhline(1/4, color='r', linestyle='--', label=r"$\eta = 1/4$")
-    ax.set_xlabel(r"$T$")
+    ax.set_xlabel(r"$T (eV)$")
     ax.set_ylabel(r"$\eta$")
-    ax.set_ylim(-0.05, 0.7)
+    ax.set_ylim(-0.05, 2)
     ax.set_title(f"L={L}, epsilon={epsilon}, rho={rho}")
     ax.legend()
     ax.grid()
@@ -77,31 +107,36 @@ def analyze_observable(L, epsilon, rho, results_dir = "results/"):
     plt.savefig(rho_path / "eta_vs_T.pdf")
     plt.close()
 
-def plot_phase_diagram(phase_data: dict, epsilon, results_dir = "results/"):
+def find_transition(T_arr, phases, from_phase, to_phase):
+    last_from, first_to = None, None
+    for t, ph in zip(T_arr, phases):
+        if ph == from_phase:
+            last_from = t
+        if ph == to_phase and last_from is not None and first_to is None:
+            first_to = t
+    if last_from is not None and first_to is not None:
+        return (last_from + first_to) / 2
+    return None
 
-    def find_transition(T_arr, phases, from_phase, to_phase):
-        last_from, first_to = None, None
-        for t, ph in zip(T_arr, phases):
-            if ph == from_phase:
-                last_from = t
-            if ph == to_phase and last_from is not None and first_to is None:
-                first_to = t
-        if last_from is not None and first_to is not None:
-            return (last_from + first_to) / 2
-        return None
-
+def extract_transitions(phase_data: dict):
     rhos = np.array(sorted(phase_data.keys()))
-    Tsh, Thl = [], []
+    T_sh_arr, T_hl_arr = [], []
 
     for rho in rhos:
-        T = phase_data[rho]["T"]
-        T_arr = np.array(T)
+        T_arr = np.array(phase_data[rho]["T"])
         phases = phase_data[rho]["phases"]
         T_sh = find_transition(T_arr, phases, from_phase="s", to_phase="h")
         T_hl = find_transition(T_arr, phases, from_phase="h", to_phase="l")
         T_sl = find_transition(T_arr, phases, from_phase="s", to_phase="l")
-        Tsh.append(T_sh)
-        Thl.append(T_hl if T_hl is not None else T_sl)
+        T_sh_arr.append(T_sh)
+        T_hl_arr.append(T_hl if T_hl is not None else T_sl)
+
+    return rhos, np.array(T_sh_arr), np.array(T_hl_arr)
+
+
+def plot_phase_diagram(phase_data: dict, epsilon, results_dir = "results/"):
+
+    rhos, Tsh, Thl = extract_transitions(phase_data)
 
     Tsh = np.array(Tsh)
     Thl = np.array(Thl)
@@ -146,12 +181,11 @@ def plot_phase_diagram(phase_data: dict, epsilon, results_dir = "results/"):
     if len(rho_hl) >= 1:
         ax.plot(T_hl, rho_hl, color='red', linestyle='--', linewidth=2, label=r'Hexatic-Liquid')
 
-    ax.set_xlabel(r"$T$")
-    ax.set_ylabel(r"$\rho$")
+    ax.set_xlabel(r"$T$ (eV)")
+    ax.set_ylabel(r"$\rho$ (grains/$\AA^2$)")
     ax.set_title(f"Phase Diagram for epsilon={epsilon}")
     ax.set_xlim(0, T_max_plot)
     ax.set_ylim(rhos.min(), rhos.max())
-    ax.set_yscale('log')
     ax.grid()
     ax.legend()
     plt.tight_layout()
