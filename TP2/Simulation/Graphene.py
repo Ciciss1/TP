@@ -10,11 +10,10 @@ from numba import njit
 from shapely.geometry import Polygon
 from shapely import contains_xy
 from scipy.spatial import Voronoi, cKDTree
-import torch
 
 import Observables as obs
 from Voronoi import PeriodicVoronoi
-from Lloyd_GPU import LloydHybrid
+from Lloyd import Lloyd
 from CG_Relaxation import CGRelaxation
 
 @njit
@@ -114,7 +113,7 @@ def load_crystal(path):
 
     return crystal
 
-class GrapheneCrystal(LloydHybrid, CGRelaxation):
+class GrapheneCrystal(Lloyd, CGRelaxation):
     '''
     Create a polycrystalline graphene structure based on the Voronoi diagram
     Attributes:
@@ -137,7 +136,20 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
         self.theta = voronoi.theta
         self.build_polycrystal(a)
 
-    def get_boundary_mask(self, generators, margin = 5):
+    def remove_close_generators(self, generators, min_dist = 0.5):
+        tree = cKDTree(generators)
+        close_pairs = tree.query_pairs(min_dist)
+        to_remove = set()
+        for i, j in close_pairs:
+            if i not in to_remove and j not in to_remove:
+                to_remove.add(i)
+
+        mask = np.ones(len(generators), dtype=bool)
+        mask[list(to_remove)] = False
+
+        return generators[mask]
+
+    def get_boundary_mask(self, generators, margin = 10):
         '''
         Identify generators that are close to the grains boundaries
         Inputs:
@@ -146,19 +158,33 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
         Outputs:
             boundary_mask : boolean mask
         '''
-        tree = cKDTree(generators)
-        boundary_mask = np.zeros(len(generators), dtype=bool)
+        L = self.L
 
-        for v1, v2 in zip(self.lattice.ridge_v1, self.lattice.ridge_v2):
-            edge_len = np.linalg.norm(v2 - v1)
-            n_samples = max(2, int(edge_len / (1.42 * 0.5)))
-            for t in np.linspace(0, 1, n_samples):
-                pt = v1 * (1 - t) + v2 * t
-                idxs = tree.query_ball_point(pt, margin)
-                for idx in idxs:
-                    boundary_mask[idx] = True
+        vertices = np.array(self.vor.ridge_vertices)
+        valid = (vertices[:, 0] != -1) & (vertices[:, 1] != -1)
+        vertices = vertices[valid]
 
-        return boundary_mask
+        v1 = self.vor.vertices[vertices[:, 0]]
+        v2 = self.vor.vertices[vertices[:, 1]]
+
+        self.boundary_mask = np.zeros(len(generators), dtype=bool)
+
+        for i in range(len(v1)):
+            edge_vec = v2[i] - v1[i]
+            edge_length = np.linalg.norm(edge_vec)
+            if edge_length < 1e-8:
+                continue
+            edge_dir = edge_vec / edge_length
+
+            to_v1 = generators - v1[i]
+            proj_length = np.dot(to_v1, edge_dir)
+            proj_length = np.clip(proj_length, 0, edge_length)
+            closest_point = v1[i] + np.outer(proj_length, edge_dir)
+            dist_to_edge = np.linalg.norm(generators - closest_point, axis=1)
+
+            self.boundary_mask |= (dist_to_edge < margin)
+
+        return self.boundary_mask
 
     def vertices_from_generators(self, generators):
         '''
@@ -212,7 +238,7 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
 
         return atoms, bonds
     
-    def build_polycrystal(self, a_CC = 1.42, margin = 5, n_iter = 50, tol = 0.1):
+    def build_polycrystal(self, a_CC = 1.42, margin = 10):
         '''
         Build the polycrystalline graphene structure
         Inputs:
@@ -233,7 +259,7 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
             if -1 in vertices or len(vertices) == 0:
                 continue
 
-            polygon = Polygon(self.vor.vertices[vertices]).buffer(0.1)
+            polygon = Polygon(self.vor.vertices[vertices]).buffer(0.5)
 
             min_x, min_y, max_x, max_y = polygon.bounds
             if (max_x < 0 or min_x > self.L or max_y < 0 or min_y > self.L):
@@ -258,14 +284,12 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
 
         generators = generators[mask]
 
-        boundary_mask = self.get_boundary_mask(generators, margin)
+        generators = self.remove_close_generators(generators)
+
+        self.boundary_mask = self.get_boundary_mask(generators, margin)
 
         # Relax the generators using Lloyd's algorithm
-        if torch.cuda.is_available():
-            self.relaxed_generators = self.relaxation_GPU(generators, boundary_mask, n_iter=n_iter, tol=tol)
-        else:
-            print("Using CPU for relaxation.")
-            self.relaxed_generators = self.relaxation_CPU(generators, boundary_mask, n_iter=n_iter, tol=tol)
+        self.relaxed_generators = self.relaxation(generators, self.boundary_mask)
 
         # Construct the atoms and bonds from the relaxed generators
         self.atoms, self.bonds = self.vertices_from_generators(self.relaxed_generators)
@@ -274,9 +298,7 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
         self.atoms = self.relaxation_CG(
             atoms=self.atoms,
             generators=self.relaxed_generators,
-            generator_boundary_mask=boundary_mask,
-            ftol=0.1,
-            max_steps=100,
+            generator_boundary_mask=self.boundary_mask,
         )
 
         # Compute the neighbors for each atom
@@ -300,10 +322,10 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
         return bin_centers, G6
 
     def plot_atoms(self):
-        fig_size = max(4, min(20, self.L / 30))
+        fig_size = max(6, min(20, self.L / 30))
         plt.figure(figsize=(fig_size, fig_size))
 
-        dot_size = max(0.5, 500 / self.L**2)
+        dot_size = max(1, 500 / self.L**2)
 
         plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
         plt.xlim(0, self.L)
@@ -315,20 +337,40 @@ class GrapheneCrystal(LloydHybrid, CGRelaxation):
         plt.tight_layout()
 
     def plot_bonds(self):
-        fig_size = max(4, min(20, self.L / 30))
+        fig_size = max(6, min(20, self.L / 30))
         plt.figure(figsize=(fig_size, fig_size))
 
-        lw = max(0.2, 5 / self.L)
-        dot_size = max(0.5, 500 / self.L**2)
+        lw = max(0.5, 5 / self.L)
+        dot_size = max(1, 500 / self.L**2)
 
         lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
         lc = LineCollection(lines, colors='black', linewidths=lw)
         plt.gca().add_collection(lc)
-        plt.scatter(self.relaxed_generators[:, 0], self.relaxed_generators[:, 1], s=dot_size, color='red') 
+        plt.scatter(self.relaxed_generators[self.boundary_mask][:, 0], self.relaxed_generators[self.boundary_mask][:, 1], s=dot_size, color='green')
+        plt.scatter(self.relaxed_generators[~self.boundary_mask][:, 0], self.relaxed_generators[~self.boundary_mask][:, 1], s=dot_size, color='red')
         plt.xlim(0, self.L)
         plt.ylim(0, self.L)
         plt.gca().set_aspect('equal')
         plt.title('Graphene Bonds')
+        plt.xlabel(r"$x$")
+        plt.ylabel(r"$y$")
+        plt.tight_layout()
+
+    def plot_all(self):
+        fig_size = max(6, min(20, self.L / 30))
+        plt.figure(figsize=(fig_size, fig_size))
+
+        lw = max(0.5, 5 / self.L)
+        dot_size = max(1, 500 / self.L**2)
+
+        lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
+        lc = LineCollection(lines, colors='black', linewidths=lw)
+        plt.gca().add_collection(lc)
+        plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
+        plt.xlim(0, self.L)
+        plt.ylim(0, self.L)
+        plt.gca().set_aspect('equal')
+        plt.title('Graphene Crystal with Bonds')
         plt.xlabel(r"$x$")
         plt.ylabel(r"$y$")
         plt.tight_layout()
@@ -354,7 +396,8 @@ if __name__ == "__main__":
     _ = generate_triangular_lattice(10.0)
 
     configs = [
-        (200,  0.0003,  "12 grains / 200Å  — test de base"),
+        (120,  0.0005,  "10 grains / 120Å  — test de base"),
+        # (200,  0.0003,  "12 grains / 200Å  — test de base"),
         # (500,  0.0003,  "75 grains / 500Å  — polycristal moyen"),
         # (500,  0.001,   "250 grains / 500Å — grains plus petits"),
         # (1000, 0.0003,  "300 grains / 1000Å — grande boîte"),
@@ -377,6 +420,9 @@ if __name__ == "__main__":
         plt.close()
         crystal.plot_bonds()
         plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_bonds.png", dpi=300)
+        plt.close()
+        crystal.plot_all()
+        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_all.png", dpi=300)
         plt.close()
 
 

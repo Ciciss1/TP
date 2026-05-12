@@ -161,14 +161,16 @@ def parse_n_iterations(log_file: str) -> int:
         number of iterations taken for convergence
     '''
     if not os.path.isfile(log_file):
+        print(f"Log file {log_file} not found.")
         return -1
     with open(log_file) as f:
         for line in f:
             if "Iterations" in line and "=" in line:
                 try:
-                    return int(line.split("=")[-1].strip())
+                    return int(line.split("=")[-1].strip().split()[0])
                 except ValueError:
-                    pass
+                    print(f"Could not parse iterations from line: {line}")
+    print("Could not find iteration information in log file.")
     return -1
 
 def minimize_CG(
@@ -252,6 +254,8 @@ def minimize_CG(
             raise RuntimeError("LAMMPS did not produce the expected dump file.")
         
         pos_relaxed = read_lammps_dump(dump_file, atoms, boundary_mask, L)
+        n_iter = parse_n_iterations(log_file)
+        print(f"CG relaxation completed in {n_iter} iterations.")
 
     return pos_relaxed
 
@@ -262,8 +266,8 @@ class CGRelaxation:
         atoms: np.ndarray,
         generators: np.ndarray,
         generator_boundary_mask: np.ndarray,
-        ftol: float = 0.1,
-        max_steps: int = 150,
+        ftol: float = 1.0,
+        max_steps: int = 500,
         airebo_file: str = "CH.airebo",
         n_threads: int = N_TRHEADS
         ) -> np.ndarray:
