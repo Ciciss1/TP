@@ -63,7 +63,6 @@ class PeriodicVoronoi:
             vor : Voronoi diagram
             adj_i, adj_j : indices of adjacent points
             adj_length : length of the edge between adjacent points
-            v1, v2 : coordinates of the vertices of the Voronoi edges
             theta : random orientation of the grains
         '''
         self.L = L
@@ -94,7 +93,7 @@ class PeriodicVoronoi:
     
     def get_adjacency(self):
         '''
-        Get the adjacency list, edge lengths and vertex coordinates from the Voronoi diagram
+        Get the adjacency list, edge lengths from the Voronoi diagram
         '''
         ridge_points = np.array(self.vor.ridge_points)
         ridge_vertices = np.array(self.vor.ridge_vertices)
@@ -115,8 +114,6 @@ class PeriodicVoronoi:
         self.adj_i = rp[valid, 0].astype(np.int32)
         self.adj_j = rp[valid, 1].astype(np.int32)
         self.adj_length = lengths[valid]
-        self.ridge_v1 = v1[valid]
-        self.ridge_v2 = v2[valid]
 
     def plot(self):
 
