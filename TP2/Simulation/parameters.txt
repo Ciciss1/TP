@@ -7,16 +7,16 @@
 output_dir =    "results/"
 
 # ____Hamiltonian parameters____
-epsilon =       0.5
+epsilon =       0.0
 alpha =         2.36            # (eV/AA)
 beta_RS =       -0.12
 
 # ____Lattice parameters____
-L =             150             # (AA)
-rho =           0.004           # (grains/AA^2)
+L =             300             # (AA)
+rho =           0.0003          # (grains/AA^2)
 
 # ____Monte Carlo parameters____
 n_monte_carlo = 200_000
 
 # ____Temperature____
-T =             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]      # (eV)
+T =             [15]      # (eV)

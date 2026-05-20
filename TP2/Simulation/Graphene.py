@@ -1,5 +1,3 @@
-import sys
-sys.path.insert(0, "TP2/Simulation")
 import os
 
 import numpy as np
@@ -93,7 +91,9 @@ def load_crystal(path):
     L = float(data['L'][0])
     rho = float(data['rho'][0])
 
-    vor = PeriodicVoronoi(L, rho)
+    vor = PeriodicVoronoi.__new__(PeriodicVoronoi)
+    vor.L = L
+    vor.rho = rho
     vor.points = data['points']
     vor.theta = data['theta']
     vor.N = len(vor.points)
@@ -102,13 +102,16 @@ def load_crystal(path):
 
     crystal = GrapheneCrystal.__new__(GrapheneCrystal)
     crystal.lattice = vor
+    crystal.vor = vor.vor
     crystal.L = L
     crystal.N = vor.N
     crystal.points = vor.points
     crystal.theta = vor.theta
 
     crystal.relaxed_generators = data['relaxed_generators']
-    crystal.atoms, crystal.bonds = crystal.vertices_from_generators(crystal.relaxed_generators)
+    crystal.boundary_mask = crystal.get_boundary_mask(crystal.relaxed_generators)
+    _ , crystal.bonds = crystal.vertices_from_generators(crystal.relaxed_generators)
+    crystal.atoms = data['atoms']
     crystal.neighbors = compute_neighbors(crystal.atoms, crystal.bonds)
 
     return crystal
@@ -192,16 +195,17 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         Inputs:
             generators : coordinates of the generators
         Outputs:
-            vertices : coordinates of the atoms in the graphene lattice
+            atoms : coordinates of the atoms in the graphene lattice
+            bonds : list of bonds between atoms
         '''
-
+        L = self.L
         images = [generators + np.array([dx, dy]) 
-                    for dx in [-self.L, 0, self.L]
-                    for dy in [-self.L, 0, self.L]]
+                    for dx in [-L, 0, L]
+                    for dy in [-L, 0, L]]
         all_gen = np.vstack(images)
         M = len(generators)
         vor = Voronoi(all_gen)
-
+        
         vertex_indices = set()
         for all_idx in range(4*M, 5*M):
             region = vor.regions[vor.point_region[all_idx]]
@@ -312,7 +316,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         Compute the observables for the graphene crystal
         '''
         r_max = self.L / 2
-        dr = a * np.sqrt(3) / 2
+        dr = a / 2
         num_bins = int(r_max / dr)
         bin_bounds = np.linspace(0, r_max, num_bins + 1)
         bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
@@ -321,11 +325,9 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
 
         return bin_centers, G6
 
-    def plot_atoms(self):
-        fig_size = max(6, min(20, self.L / 30))
-        plt.figure(figsize=(fig_size, fig_size))
+    def plot_atoms(self, fig_size = 6, dot_size = 1):
 
-        dot_size = max(1, 500 / self.L**2)
+        plt.figure(figsize=(fig_size, fig_size))
 
         plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
         plt.xlim(0, self.L)
@@ -336,12 +338,8 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         plt.ylabel(r"$y$")
         plt.tight_layout()
 
-    def plot_bonds(self):
-        fig_size = max(6, min(20, self.L / 30))
+    def plot_bonds(self, fig_size = 6, dot_size = 1, lw = 0.5):
         plt.figure(figsize=(fig_size, fig_size))
-
-        lw = max(0.5, 5 / self.L)
-        dot_size = max(1, 500 / self.L**2)
 
         lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
         lc = LineCollection(lines, colors='black', linewidths=lw)
@@ -356,12 +354,8 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         plt.ylabel(r"$y$")
         plt.tight_layout()
 
-    def plot_all(self):
-        fig_size = max(6, min(20, self.L / 30))
+    def plot_all(self, fig_size = 6, dot_size = 1, lw = 0.5):
         plt.figure(figsize=(fig_size, fig_size))
-
-        lw = max(0.5, 5 / self.L)
-        dot_size = max(1, 500 / self.L**2)
 
         lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
         lc = LineCollection(lines, colors='black', linewidths=lw)
@@ -375,16 +369,20 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         plt.ylabel(r"$y$")
         plt.tight_layout()
 
+    def plot_lattice(self):
+        self.lattice.plot()
+
     def save_crystal(self, path):
         if not os.path.exists(os.path.dirname(path)):
             os.makedirs(os.path.dirname(path))
         np.savez_compressed(
             path,
-            relaxed_generators = self.relaxed_generators,
             points = self.points,
             theta = self.theta,
             L = np.array([self.L]),
             rho = np.array([self.lattice.rho]),
+            relaxed_generators = self.relaxed_generators,
+            atoms = self.atoms,
         )
 
 
@@ -415,12 +413,6 @@ if __name__ == "__main__":
 
         crystal = GrapheneCrystal(vor)
 
-        crystal.plot_atoms()
-        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_atoms.png", dpi=300)
-        plt.close()
-        crystal.plot_bonds()
-        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_bonds.png", dpi=300)
-        plt.close()
         crystal.plot_all()
         plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_all.png", dpi=300)
         plt.close()

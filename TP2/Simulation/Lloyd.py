@@ -63,7 +63,7 @@ def relaxation_CPU(L, generators, boundary_mask, n_iter = 200, tol = 1e-3):
         delta = np.max(np.linalg.norm(new_positions[free_idx] - generators_relax[free_idx], axis=1))
         generators_relax = new_positions
 
-        print(f"Iteration {it+1}, max displacement: {delta:.6f}, time: {time.perf_counter() - t0:.2f} s")
+        # print(f"Iteration {it+1}, max displacement: {delta:.6f}, time: {time.perf_counter() - t0:.2f} s")
 
         if delta < tol:
             break

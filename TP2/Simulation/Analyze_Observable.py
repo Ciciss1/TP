@@ -2,12 +2,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 from pathlib import Path
+
 from Graphene import GrapheneCrystal, load_crystal
+import Observables as obs
+
 
 def power_law(x, a, b):
     return a * x**(-b)
 
-def analyze_observable(L, epsilon, rho, results_dir = "results/"):
+def analyze_observable(L, epsilon, rho, fig_size = 6, dot_size = 1, lw = 0.5, results_dir = "results/"):
 
     rho_path = Path(results_dir) / f"eps_{epsilon}" / f"L_{L}" / f"rho_{rho}"
 
@@ -37,18 +40,37 @@ def analyze_observable(L, epsilon, rho, results_dir = "results/"):
         plt.savefig(T_dir / "Lattice.pdf")
         plt.close()
 
-        crystal.plot_atoms()
-        plt.savefig(T_dir / "Atoms.pdf")
+        angles = []
+        
+        for i, atom in enumerate(crystal.atoms):
+            psi_6_i = obs.compute_psi6(i, crystal.atoms, crystal.neighbors)
+            angle = np.angle(psi_6_i) / 6
+            angles.append(angle)
+
+        angles = np.array(angles)
+
+        # crystal.plot_bonds(fig_size=fig_size, dot_size=dot_size, lw=lw)
+        # plt.savefig(T_dir / "Bonds.pdf")
+        # plt.close()
+
+        crystal.plot_all(fig_size=fig_size, dot_size=dot_size, lw=lw)
+        # im = plt.imshow()
+
+        plt.savefig(T_dir / "Crystal.pdf")
         plt.close()
 
-        crystal.plot_bonds()
-        plt.savefig(T_dir / "Bonds.pdf")
+        
+        plt.hist(angles, bins=60)
+        plt.xlabel(r"$\theta$ (radians)")
+        plt.ylabel("Count")
+        plt.tight_layout()
+        plt.savefig(T_dir / "Angle_Distribution.pdf")
         plt.close()
 
         bin_centers, G6 = crystal.compute_observables()
 
         a_CC = 1.42
-        r_min = 5 * a_CC * np.sqrt(3) / 2
+        r_min = 5
         mask_fit = bin_centers >= r_min
 
         x_fit = bin_centers[mask_fit]
