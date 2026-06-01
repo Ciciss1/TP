@@ -37,13 +37,14 @@ def bin_index(r, bin_bounds):
     return k - 1
 
 @njit
-def compute_psi6(i, atoms, neighbors):
+def compute_psi6(i, atoms, neighbors, L):
     '''
     Compute the local orientational order parameter
     Inputs:
         i : index of the atom
         atoms : coordinates of the atoms
         neighbors : list of nearest neighbors for each atom
+        L : size of the system
     Outputs:
         psi6 : local orientational order parameter for atom i
     '''
@@ -55,6 +56,8 @@ def compute_psi6(i, atoms, neighbors):
             continue
         dx = atoms[nb[j], 0] - atoms[i, 0]
         dy = atoms[nb[j], 1] - atoms[i, 1]
+        dx -= L * np.round(dx / L)
+        dy -= L * np.round(dy / L)
         theta = np.arctan2(dy, dx)
         sum_psi += np.exp(6j * theta)
         cnt += 1
@@ -62,23 +65,27 @@ def compute_psi6(i, atoms, neighbors):
     return psi6            
 
 @njit
-def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples = 5_000_000):
+def compute_orientational_correlation(coords, neighbors, bin_bounds, L, n_samples = 10_000_000):
     '''
     Compute the orientational correlation function G6(r) 
     Inputs:
         coords : coordinates of the atoms
         neighbors : list of nearest neighbors for each atom
         bin_bounds : array of bin boundaries
+        L : size of the system
         n_samples : number of samples to use for the correlation function
     Outputs:
         G6 : orientational correlation function for each bin
     '''
     N = len(coords)
     num_bins = len(bin_bounds) - 1
-    r_max = bin_bounds[num_bins]
 
     G6_re = np.zeros(num_bins, dtype=np.float64)
     count = np.zeros(num_bins, dtype=np.int64)
+
+    psi6_values = np.empty(N, dtype=np.complex128)
+    for i in range(N):
+        psi6_values[i] = compute_psi6(i, coords, neighbors, L)
 
     for _ in range(n_samples):
         i = np.random.randint(0, N)
@@ -86,16 +93,16 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples =
         
         dx = coords[i, 0] - coords[j, 0]
         dy = coords[i, 1] - coords[j, 1]
+        dx -= L * np.round(dx / L)
+        dy -= L * np.round(dy / L)
         r = np.sqrt(dx * dx + dy * dy)
-        if r >= r_max:
-            continue
 
         b = bin_index(r, bin_bounds)
         if b < 0:
             continue
 
-        psi6_i = compute_psi6(i, coords, neighbors)
-        psi6_j = compute_psi6(j, coords, neighbors)
+        psi6_i = psi6_values[i]
+        psi6_j = psi6_values[j]
 
         val_re = psi6_i.real * psi6_j.real + psi6_i.imag * psi6_j.imag
 
@@ -107,11 +114,14 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, n_samples =
         if count[b] > 0:
             G6[b] = G6_re[b] / count[b]
     
+    # max_val = np.max(G6)
+    # if max_val > 0:
+    #     G6 /= max_val
+    
     return G6
 
-
 @njit
-def build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC = 1.42):
+def build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC = 1.42, sublattice = 'A'):
     '''
     Build the reference sites of the graphene lattice
     Inputs:
@@ -119,6 +129,7 @@ def build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC = 1.42):
         cos_t, sin_t : cosine and sine of the rotation angle
         L : size of the lattice
         a_CC : carbon-carbon bond length
+        sublattice : sublattice type ('A' or 'B')
     Outputs:
         sites : coordinates of the reference sites
     '''
@@ -128,8 +139,10 @@ def build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC = 1.42):
     a1x, a1y = a, 0
     a2x, a2y = a / 2, a * 0.8660254037844386
 
-    bAx, bAy = 0, 0
-    bBx, bBy = a1x / 2, a1y * 0.28867513459481287
+    if sublattice == 'A':
+        bx, by = 0.0, 0.0
+    else:
+        bx, by = a_CC, 0.0
 
     n = 2 * (2 * nmax + 1) ** 2
     sites = np.empty((n, 2), dtype=np.float64)
@@ -137,18 +150,8 @@ def build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC = 1.42):
 
     for i in range(-nmax, nmax + 1):
         for j in range(-nmax, nmax + 1):
-            Rx = i * a1x + j * a2x
-            Ry = i * a1y + j * a2y
-
-            lx = Rx + bAx
-            ly = Ry + bAy
-
-            sites[idx, 0] = cx + cos_t * lx - sin_t * ly
-            sites[idx, 1] = cy + sin_t * lx + cos_t * ly
-            idx += 1
-
-            lx = Rx + bBx
-            ly = Ry + bBy
+            lx = i * a1x + j * a2x + bx
+            ly = i * a1y + j * a2y + by
 
             sites[idx, 0] = cx + cos_t * lx - sin_t * ly
             sites[idx, 1] = cy + sin_t * lx + cos_t * ly
@@ -156,160 +159,179 @@ def build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC = 1.42):
 
     return sites[:idx]
 
-def compute_reference_sites(atoms, grain_mask, grain_centers, grain_thetas, L, a_CC = 1.42):
+def assign_sublattice(coords, neighbors):
     '''
-    Compute the reference sites of each atom
+    Assign the sublattice type (A or B) to each atom
     Inputs:
-        atoms : coordinates of the atoms
-        grain_mask : array indicating the grain of each atom
-        grain_centers : coordinates of the centers of the grains
-        grain_thetas : rotation angles of the grains
+        coords : coordinates of the atoms
+        neighbors : list of nearest neighbors for each atom
+    Outputs:
+        sublattice : array indicating the sublattice type for each atom (0 for A, 1 for B)
+    '''
+    N = len(coords)
+    label = np.full(N, -1, dtype=np.int64)
+
+    for start in range(N):
+        if label[start] != -1:
+            continue
+        queue = [start]
+        label[start] = 0
+        head = 0
+
+        while head < len(queue):
+            i = queue[head]
+            head += 1
+            for j in neighbors[i]:
+                if j < 0:
+                    break
+                if label[j] == -1:
+                    label[j] = 1 - label[i]
+                    queue.append(j)
+
+    return label
+
+def compute_reference_sites(coords, neighbors, grain_mask, grain_center, grain_theta, L, a_CC = 1.42):
+    '''
+    Compute the reference sites for the atoms in a grain
+    Inputs:
+        coords : coordinates of the atoms
+        neighbors : list of nearest neighbors for each atom
+        grain_mask : boolean array indicating which atoms belong to the grain
+        grain_center : coordinates of the center of the grain
+        grain_theta : orientation angle of the grain
+        L : size of the system
         a_CC : carbon-carbon bond length
     Outputs:
-        R : coordinates of the reference sites for each atom
+        R : coordinates of the reference sites for the atoms in the grain
     '''
-    N = len(atoms)
+    N = len(coords)
     R = np.empty((N, 2), dtype=np.float64)
 
     grain_ids = np.unique(grain_mask)
     grain_ids = grain_ids[grain_ids >= 0]
 
-    for gid in grain_ids:
-        idx = np.where(grain_mask == gid)[0]
+    for g in grain_ids:
+        idx = np.where(grain_mask == g)[0]
         if len(idx) == 0:
             continue
 
-        ref_sites = build_reference_sites(
-            float(grain_centers[gid, 0]), float(grain_centers[gid, 1]),
-            float(np.cos(grain_thetas[gid])), float(np.sin(grain_thetas[gid])),
-            float(L), float(a_CC)
-        )
-        ref_sites += np.array([L / 2, L / 2])
+        theta = grain_theta[g]
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        cx, cy = float(grain_center[g, 0]), float(grain_center[g, 1])
 
-        tree = cKDTree(ref_sites)
-        _, nearest = tree.query(atoms[idx], k=1, workers=-1)
-        R[idx] = ref_sites[nearest]
+        refs_A = build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC, sublattice='A')
 
+        tree_A = cKDTree(refs_A)
+
+        _, idx_A = tree_A.query(coords[idx, :2], k=1, workers=-1)
+
+        R[idx] = refs_A[idx_A]
+        
     return R
 
-@njit(parallel=True, cache=True)
-def compute_GT_kernel(R, grain_of_atoms, Gx_per_grain, Gy_per_grain, bin_bounds, n_samples, n_threads):
+@njit(parallel=True)
+def compute_GT(coords, R, grain_of_atoms, Gx_per_grain, Gy_per_grain, bin_bounds, L, n_samples = 10_000_000, n_threads = 8):
     '''
-    Compute the translational correlation function GT(r) for a single grain
+    Compute the translational correlation function GT(r) 
     Inputs:
+        coords : coordinates of the atoms
         R : coordinates of the reference sites for each atom
         grain_of_atoms : array indicating the grain of each atom
         Gx_per_grain, Gy_per_grain : components of the reciprocal lattice vector for each grain
-        bin_bounds : array of bin boundariesµ
+        bin_bounds : array of bin boundaries
+        L : size of the lattice
         n_samples : number of samples to use for the correlation function
-        n_threads : number of threads to use for parallelization
     Outputs:
-        GT : translational correlation for each grain
+        GT : translational correlation function
     '''
-    N = len(R)
+    N = len(coords)
     num_bins = len(bin_bounds) - 1
-    r_max = bin_bounds[num_bins]
-
-    GT_all = np.zeros((n_threads, num_bins), dtype=np.float64)
-    count_all = np.zeros((n_threads, num_bins), dtype=np.int64)
     chunk = n_samples // n_threads
+
+    GT = np.zeros((n_threads, num_bins), dtype=np.float64)
+    count = np.zeros((n_threads, num_bins), dtype=np.int64)
 
     for t in prange(n_threads):
         gt = np.zeros(num_bins, dtype=np.float64)
-        count = np.zeros(num_bins, dtype=np.int64)
-        
+        cnt = np.zeros(num_bins, dtype=np.int64)
+
         for _ in range(chunk):
             i = np.random.randint(0, N)
             j = np.random.randint(0, N)
-            
-            dx = R[i, 0] - R[j, 0]
-            dy = R[i, 1] - R[j, 1]
+
+            dx = coords[i, 0] - coords[j, 0]
+            dy = coords[i, 1] - coords[j, 1]
+            dx -= L * np.round(dx / L)
+            dy -= L * np.round(dy / L)
+
             r = np.sqrt(dx * dx + dy * dy)
-            if r >= r_max:
-                continue
 
             b = bin_index(r, bin_bounds)
             if b < 0:
                 continue
-            
-            gi = grain_of_atoms[i]
-            gj = grain_of_atoms[j]
 
-            phi_i = Gx_per_grain[gi] * R[i, 0] + Gy_per_grain[gi] * R[i, 1]
-            phi_j = Gx_per_grain[gj] * R[j, 0] + Gy_per_grain[gj] * R[j, 1]
+            g_i = grain_of_atoms[i]
+            g_j = grain_of_atoms[j]
+
+            phi_i = Gx_per_grain[g_i] * R[i, 0] + Gy_per_grain[g_i] * R[i, 1]
+            phi_j = Gx_per_grain[g_j] * R[j, 0] + Gy_per_grain[g_j] * R[j, 1]
 
             gt[b] += np.cos(phi_i - phi_j)
-            count[b] += 1
+            cnt[b] += 1
 
-        GT_all[t] = gt
-        count_all[t] = count
+        GT[t] = gt
+        count[t] = cnt
 
-    GT = np.zeros(num_bins, dtype=np.float64)
-    count = np.zeros(num_bins, dtype=np.int64)
+    GT_total = np.zeros(num_bins, dtype=np.float64)
+    count_total = np.zeros(num_bins, dtype=np.int64)
     for t in range(n_threads):
         for b in range(num_bins):
-            GT[b] += GT_all[t, b]
-            count[b] += count_all[t, b]
+            GT_total[b] += GT[t, b]
+            count_total[b] += count[t, b]
 
     for b in range(num_bins):
-        if count[b] > 0:
-            GT[b] /= count[b]
+        if count_total[b] > 0:
+            GT_total[b] /= count_total[b]
 
-    return GT
+    return GT_total
 
-def compute_translational_correlation(atoms, grain_mask, grain_centers, grain_thetas, bin_bounds, L, n_samples = 200_000, a_CC = 1.42, n_threads = 4):
+def compute_translational_correlation(coords, neighbors, grain_of_atoms, grain_centers, grain_thetas, bin_bounds, L, n_samples = 10_000_000, a_CC = 1.42):
     '''
     Compute the translational correlation function GT(r) 
     Inputs:
-        atoms : coordinates of the atoms
-        grain_mask : array indicating the grain of each atom
+        coords : coordinates of the atoms
+        neighbors : array of neighbor indices for each atom
+        grain_of_atoms : array indicating the grain of each atom
         grain_centers : coordinates of the centers of the grains
-        grain_thetas : rotation angles of the grains
+        grain_thetas : orientation angles of the grains
         bin_bounds : array of bin boundaries
-        L : size of the lattice
+        L : size of the system
         n_samples : number of samples to use for the correlation function
-        a_CC : carbon-carbon bond length
-        n_threads : number of threads to use for parallelization
+        a_CC : carbon-carbon bond length (default: 1.42 Angstroms)
     Outputs:
-        GT : translational correlation function
+        GT : translational correlation function for each bin
     '''
     a = a_CC * np.sqrt(3)
-    b1 = (2 * np.pi / a) * np.array([1, -1/np.sqrt(3)])
-    b2 = (2 * np.pi / a) * np.array([0, 2/np.sqrt(3)])
-    G_base = 2 * b1 + b2
+    G_base = (2 * np.pi / a) * np.array([1.0, -1.0 / np.sqrt(3)])
 
-    N = len(atoms)
-    R = np.empty((N, 2), dtype=np.float64)
-    Gx_per_grain = np.empty(len(grain_centers), dtype=np.float64)
-    Gy_per_grain = np.empty(len(grain_centers), dtype=np.float64)
+    n_grains = len(grain_centers)
+    Gx = np.empty(n_grains, dtype=np.float64)
+    Gy = np.empty(n_grains, dtype=np.float64)
 
-    grain_ids = np.unique(grain_mask)
-    grain_ids = grain_ids[grain_ids >= 0]
+    for g in range(n_grains):
+        theta = grain_thetas[g]
+        cos_t, sin_t = np.cos(theta), np.sin(theta)
+        Gx[g] = cos_t * G_base[0] - sin_t * G_base[1]
+        Gy[g] = sin_t * G_base[0] + cos_t * G_base[1]
 
-    for gid in grain_ids:
-        idx = np.where(grain_mask == gid)[0]
-        theta = grain_thetas[gid]
-        cos_t = np.cos(theta)
-        sin_t = np.sin(theta)
+    R = compute_reference_sites(coords, neighbors, grain_of_atoms, grain_centers, grain_thetas, L, a_CC)
 
-        Gx_per_grain[gid] = G_base[0] * cos_t - G_base[1] * sin_t
-        Gy_per_grain[gid] = G_base[0] * sin_t + G_base[1] * cos_t
-
-        ref = build_reference_sites(
-            float(grain_centers[gid, 0]), float(grain_centers[gid, 1]),
-            float(np.cos(grain_thetas[gid])), float(np.sin(grain_thetas[gid])),
-            float(L), float(a_CC)
-        )
-        _, nn = cKDTree(ref).query(atoms[idx], k=1, workers=-1)
-        R[idx] = ref[nn]
-
-    GT = compute_GT_kernel(
+    return compute_GT(
+        np.ascontiguousarray(coords[:, :2], dtype=np.float64),
         np.ascontiguousarray(R, dtype=np.float64),
-        np.ascontiguousarray(grain_mask, dtype=np.int64),
-        np.ascontiguousarray(Gx_per_grain, dtype=np.float64),
-        np.ascontiguousarray(Gy_per_grain, dtype=np.float64),
+        np.ascontiguousarray(grain_of_atoms, dtype=np.int64),
+        np.ascontiguousarray(Gx, dtype=np.float64),
+        np.ascontiguousarray(Gy, dtype=np.float64),
         np.ascontiguousarray(bin_bounds, dtype=np.float64),
-        int(n_samples), int(n_threads)
+        L, n_samples
     )
-
-    return GT

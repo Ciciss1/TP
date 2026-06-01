@@ -10,6 +10,9 @@ import Observables as obs
 def power_law(x, a, b):
     return a * x**(-b)
 
+def exponential(x, a, b):
+    return a * np.exp(-b * x)
+
 def analyze_observable(L, epsilon, rho, fig_size = 6, dot_size = 1, lw = 0.5, results_dir = "results/"):
 
     rho_path = Path(results_dir) / f"eps_{epsilon}" / f"L_{L}" / f"rho_{rho}"
@@ -35,16 +38,16 @@ def analyze_observable(L, epsilon, rho, fig_size = 6, dot_size = 1, lw = 0.5, re
         
         crystal = load_crystal(Crystal_path)
 
-        voronoi = crystal.lattice
-        voronoi.plot()
+        crystal.plot_lattice()
         plt.savefig(T_dir / "Lattice.pdf")
         plt.close()
 
         angles = []
         
         for i, atom in enumerate(crystal.atoms):
-            psi_6_i = obs.compute_psi6(i, crystal.atoms, crystal.neighbors)
-            angle = np.angle(psi_6_i) / 6
+            psi_6_i = obs.compute_psi6(i, crystal.atoms, crystal.neighbors, crystal.L)
+            angle = np.angle(psi_6_i)
+            angle = angle % (np.pi/3)
             angles.append(angle)
 
         angles = np.array(angles)
@@ -53,10 +56,9 @@ def analyze_observable(L, epsilon, rho, fig_size = 6, dot_size = 1, lw = 0.5, re
         # plt.savefig(T_dir / "Bonds.pdf")
         # plt.close()
 
-        crystal.plot_all(fig_size=fig_size, dot_size=dot_size, lw=lw)
-        # im = plt.imshow()
+        crystal.plot_all(fig_size=fig_size, dot_size=dot_size, lw=lw, atom_phase=angles)
 
-        plt.savefig(T_dir / "Crystal.pdf")
+        plt.savefig(T_dir / "Crystal.png", dpi=300)
         plt.close()
 
         
@@ -67,7 +69,7 @@ def analyze_observable(L, epsilon, rho, fig_size = 6, dot_size = 1, lw = 0.5, re
         plt.savefig(T_dir / "Angle_Distribution.pdf")
         plt.close()
 
-        bin_centers, G6 = crystal.compute_observables()
+        bin_centers, G6, GT = crystal.compute_observables()
 
         a_CC = 1.42
         r_min = 5
@@ -109,6 +111,38 @@ def analyze_observable(L, epsilon, rho, fig_size = 6, dot_size = 1, lw = 0.5, re
         fig.suptitle(f"L={L}, epsilon={epsilon}, rho={rho}")
         plt.tight_layout()
         plt.savefig(T_dir / "G6_fit.pdf")
+        plt.close()
+
+        coeffs_exp, cov_exp = curve_fit(exponential, x_fit, GT[mask_fit])
+        a, b = coeffs_exp
+        xi = 1/b
+        xi_err = np.sqrt(cov_exp[1, 1]) / b**2
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+        ax1 = axes[0]
+        ax1.plot(bin_centers, GT, label=r"$G_T(r)$")
+        ax1.plot(x_fit, exponential(x_fit, *coeffs_exp), 'r--', label=f"Fit: $\\xi$={xi:.2f}±{xi_err:.2f} Å")
+        ax1.set_ylim(-0.05, 1.05)
+        ax1.set_xlabel(r"$r (\AA)$")
+        ax1.set_ylabel(r"$G_T(r)$")
+        ax1.set_title(f"Linear Scale - T={T}")
+        ax1.legend()
+        ax1.grid()
+
+        ax2 = axes[1]
+        ax2.loglog(bin_centers, GT, label=r"$G_T(r)$")
+        ax2.loglog(x_fit, exponential(x_fit, *coeffs_exp), 'r--', label=f"Fit: $\\xi$={xi:.2f}±{xi_err:.2f} Å")
+        ax2.set_ylim(1e-4, 1.05)
+        ax2.set_xlabel(r"$r (\AA)$")
+        ax2.set_ylabel(r"$G_T(r)$")
+        ax2.set_title(f"Log-Log Scale - T={T}")
+        ax2.legend()
+        ax2.grid()
+
+        fig.suptitle(f"L={L}, epsilon={epsilon}, rho={rho}")
+        plt.tight_layout()
+        plt.savefig(T_dir / "GT.pdf")
         plt.close()
 
     T_values = np.array(T_values)

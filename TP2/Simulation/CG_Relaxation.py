@@ -28,7 +28,7 @@ def atom_boundary_mask_from_generators(
         mask for atoms that are on the boundary
     '''
     tree = cKDTree(generators)
-    _, nearest_gen = tree.query(atoms, k=1)
+    _, nearest_gen = tree.query(atoms[:, :2], k=1)
     return generator_boundary_mask[nearest_gen]
 
 def write_lammps_data_2d(
@@ -54,8 +54,8 @@ def write_lammps_data_2d(
         f.write("Masses\n\n")
         f.write(f"1 {C_MASS:.6f}\n\n")
         f.write("Atoms\n\n")
-        for i, (x, y) in enumerate(atoms):
-            f.write(f"{i+1} 1 {x:.8f} {y:.8f} 0.0\n")
+        for i, (x, y, z) in enumerate(atoms):
+            f.write(f"{i+1} 1 {x:.8f} {y:.8f} {z:.8f}\n")
 
 def write_lammps_data_3d(
         atoms: np.ndarray,
@@ -372,8 +372,7 @@ def minimize_CG(
         n_iter = parse_n_iterations(log_file_2d)
         # print(f"CG relaxation completed in {n_iter} iterations.")
 
-        atoms_3d = np.hstack([pos_2d, np.zeros((len(pos_2d), 1))])
-        write_lammps_data_3d(atoms_3d, L, data_file)
+        write_lammps_data_3d(pos_2d, L, data_file)
         input_script_3d = write_lammps_input_3d(
             data_file=data_file,
             dump_file=dump_file_3d,
@@ -410,12 +409,11 @@ def minimize_CG(
         if not os.path.isfile(dump_file_3d):
             raise RuntimeError("LAMMPS did not produce the expected dump file.")
         
-        pos_relaxed = read_lammps_dump_3d(dump_file_3d, atoms_3d, boundary_mask, L)
+        pos_relaxed = read_lammps_dump_3d(dump_file_3d, pos_2d, boundary_mask, L)
         n_iter_3d = parse_n_iterations(log_file_3d)
         # print(f"3D relaxation completed in {n_iter_3d} iterations.")
 
-        pos_relaxed_2d = pos_relaxed[:, :2]
-        return pos_relaxed_2d
+        return pos_relaxed
 
 class CGRelaxation:
 

@@ -8,6 +8,7 @@ from numba import njit
 from shapely.geometry import Polygon
 from shapely import contains_xy
 from scipy.spatial import Voronoi, cKDTree
+from scipy.interpolate import griddata
 
 import Observables as obs
 from Voronoi import PeriodicVoronoi
@@ -205,43 +206,43 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         all_gen = np.vstack(images)
         M = len(generators)
         vor = Voronoi(all_gen)
-        
-        vertex_indices = set()
-        for all_idx in range(4*M, 5*M):
-            region = vor.regions[vor.point_region[all_idx]]
-            if -1 in region or len(region) == 0:
-                continue
-            vertex_indices.update(region)
 
-        vertex_list = sorted(vertex_indices)
-        old_to_new = {old: new for new, old in enumerate(vertex_list)}
-        atoms = vor.vertices[vertex_list]
+        central_cells = set(range(4 * M, 5 * M))
+        tol = 1e-4
 
-        bonds = []
-        for (vi, vj) in vor.ridge_vertices:
+        v2atom = {}
+        atom_list = []
+        pos_to_atom = {}
+
+        def get_atom(raw_idx):
+            if raw_idx in v2atom:
+                return v2atom[raw_idx]
+            wpos = vor.vertices[raw_idx] % L
+            key = (int(round(wpos[0] / tol)), int(round(wpos[1] / tol)))
+            if key not in pos_to_atom:
+                pos_to_atom[key] = len(atom_list)
+                atom_list.append(wpos)
+            v2atom[raw_idx] = pos_to_atom[key]
+            return v2atom[raw_idx]
+
+        bonds = set()
+        for k in range(len(vor.ridge_points)):
+            pi, pj = vor.ridge_points[k]
+            vi, vj = vor.ridge_vertices[k]
             if vi == -1 or vj == -1:
                 continue
-            
-            if vi not in old_to_new or vj not in old_to_new:
+            if pi not in central_cells and pj not in central_cells:
                 continue
+            
+            i, j = get_atom(vi), get_atom(vj)
+            if i != j:
+                bonds.add((min(i, j), max(i, j)))
 
-            bonds.append((old_to_new[vi], old_to_new[vj]))
-
-        bonds = np.array(bonds, dtype=np.int64)
-
-        mask = (atoms[:, 0] >= 0) & (atoms[:, 0] <= self.L) & (atoms[:, 1] >= 0) & (atoms[:, 1] <= self.L)
-
-        bond_mask = mask[bonds[:, 0]] & mask[bonds[:, 1]]
-        bonds = bonds[bond_mask]
-        new_indices = np.full(len(atoms), -1, dtype=np.int64)
-        new_indices[mask] = np.arange(np.sum(mask))
-        bonds = new_indices[bonds]
-        bonds = bonds[(bonds[:, 0] >= 0) & (bonds[:, 1] >= 0)]
-
-        atoms = atoms[mask]
+        atoms = np.array(atom_list)
+        bonds = np.array(sorted(bonds), dtype=np.int64)
 
         return atoms, bonds
-    
+
     def build_polycrystal(self, a_CC = 1.42, margin = 10):
         '''
         Build the polycrystalline graphene structure
@@ -298,6 +299,8 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         # Construct the atoms and bonds from the relaxed generators
         self.atoms, self.bonds = self.vertices_from_generators(self.relaxed_generators)
 
+        self.atoms = np.hstack([self.atoms, np.zeros((len(self.atoms), 1))])
+
         # Relax the atoms using LAMMPS
         self.atoms = self.relaxation_CG(
             atoms=self.atoms,
@@ -316,14 +319,20 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         Compute the observables for the graphene crystal
         '''
         r_max = self.L / 2
-        dr = a / 2
+        dr = a * np.sqrt(3) / 2
         num_bins = int(r_max / dr)
         bin_bounds = np.linspace(0, r_max, num_bins + 1)
         bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
 
-        G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds, n_samples)
+        grain_centers = self.points
+        tree = cKDTree(grain_centers)
+        grain_of_atoms = tree.query(self.atoms[:, :2], k=1, workers=-1)[1]
+        grain_of_atoms = grain_of_atoms.astype(np.int64)
 
-        return bin_centers, G6
+        G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds, n_samples)
+        GT = obs.compute_translational_correlation(self.atoms, self.neighbors, grain_of_atoms, self.points, self.theta, bin_bounds, self.L)
+
+        return bin_centers, G6, GT
 
     def plot_atoms(self, fig_size = 6, dot_size = 1):
 
@@ -341,7 +350,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
     def plot_bonds(self, fig_size = 6, dot_size = 1, lw = 0.5):
         plt.figure(figsize=(fig_size, fig_size))
 
-        lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
+        lines = [(self.atoms[i, :2], self.atoms[j, :2]) for i, j in self.bonds]
         lc = LineCollection(lines, colors='black', linewidths=lw)
         plt.gca().add_collection(lc)
         plt.scatter(self.relaxed_generators[self.boundary_mask][:, 0], self.relaxed_generators[self.boundary_mask][:, 1], s=dot_size, color='green')
@@ -354,19 +363,29 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         plt.ylabel(r"$y$")
         plt.tight_layout()
 
-    def plot_all(self, fig_size = 6, dot_size = 1, lw = 0.5):
-        plt.figure(figsize=(fig_size, fig_size))
+    def plot_all(self, fig_size = 6, dot_size = 1, lw = 0.5, atom_phase = None):
+        fig, ax = plt.subplots(figsize=(fig_size * 1.2, fig_size))
 
-        lines = [(self.atoms[i], self.atoms[j]) for i, j in self.bonds]
+        lines = [(self.atoms[i, :2], self.atoms[j, :2]) for i, j in self.bonds if np.linalg.norm(self.atoms[i, :2] - self.atoms[j, :2]) < 4]
         lc = LineCollection(lines, colors='black', linewidths=lw)
-        plt.gca().add_collection(lc)
-        plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
-        plt.xlim(0, self.L)
-        plt.ylim(0, self.L)
-        plt.gca().set_aspect('equal')
-        plt.title('Graphene Crystal with Bonds')
-        plt.xlabel(r"$x$")
-        plt.ylabel(r"$y$")
+        ax.add_collection(lc)        
+        if atom_phase is not None:
+            phase_norm = atom_phase / (np.pi/3)
+
+            mp = ax.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, c=phase_norm, cmap='hsv', vmin=0, vmax=1, zorder=2)
+
+            cbar = fig.colorbar(mp, ax=ax, ticks=[0, 0.25, 0.5, 0.75, 1])
+            cbar.ax.set_yticklabels(['0', r'$\pi/12$', r'$\pi/6$', r'$\pi/4$', r'$\pi/3$'], fontsize=10)
+            cbar.ax.set_ylabel(r'$\arg(\psi_6) mod \pi/3$', fontsize=12)
+        else:
+            ax.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
+
+        ax.set_xlim(0, self.L)
+        ax.set_ylim(0, self.L)
+        ax.set_aspect('equal')
+        ax.set_title('Graphene Crystal')
+        ax.set_xlabel(r"$x$")
+        ax.set_ylabel(r"$y$")
         plt.tight_layout()
 
     def plot_lattice(self):
@@ -413,7 +432,15 @@ if __name__ == "__main__":
 
         crystal = GrapheneCrystal(vor)
 
-        crystal.plot_all()
+        angles = []
+        for i, atom in enumerate(crystal.atoms):
+            psi_6_i = obs.compute_psi6(i, crystal.atoms, crystal.neighbors, crystal.L)
+            angle = np.angle(psi_6_i) % (np.pi / 3)
+            angles.append(angle)
+
+        angles = np.array(angles)
+
+        crystal.plot_all(atom_phase=angles)
         plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_all.png", dpi=300)
         plt.close()
 
