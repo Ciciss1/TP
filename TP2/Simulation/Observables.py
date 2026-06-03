@@ -114,9 +114,7 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, L, n_sample
         if count[b] > 0:
             G6[b] = G6_re[b] / count[b]
     
-    # max_val = np.max(G6)
-    # if max_val > 0:
-    #     G6 /= max_val
+    G6[0] = 1.0
     
     return G6
 
@@ -207,6 +205,7 @@ def compute_reference_sites(coords, neighbors, grain_mask, grain_center, grain_t
     N = len(coords)
     R = np.empty((N, 2), dtype=np.float64)
 
+    sublattice = assign_sublattice(coords, neighbors)
     grain_ids = np.unique(grain_mask)
     grain_ids = grain_ids[grain_ids >= 0]
 
@@ -219,14 +218,20 @@ def compute_reference_sites(coords, neighbors, grain_mask, grain_center, grain_t
         cos_t, sin_t = np.cos(theta), np.sin(theta)
         cx, cy = float(grain_center[g, 0]), float(grain_center[g, 1])
 
+        idx_A = idx[sublattice[idx] == 0]
+        idx_B = idx[sublattice[idx] == 1]
+
         refs_A = build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC, sublattice='A')
-
         tree_A = cKDTree(refs_A)
+        _, nn_A = tree_A.query(coords[idx_A, :2], k=1, workers=-1)
 
-        _, idx_A = tree_A.query(coords[idx, :2], k=1, workers=-1)
+        refs_B = build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC, sublattice='B')
+        tree_B = cKDTree(refs_B)
+        _, nn_B = tree_B.query(coords[idx_B, :2], k=1, workers=-1)
 
-        R[idx] = refs_A[idx_A]
-        
+        R[idx_A] = refs_A[nn_A]
+        R[idx_B] = refs_B[nn_B]
+
     return R
 
 @njit(parallel=True)
@@ -273,8 +278,14 @@ def compute_GT(coords, R, grain_of_atoms, Gx_per_grain, Gy_per_grain, bin_bounds
             g_i = grain_of_atoms[i]
             g_j = grain_of_atoms[j]
 
-            phi_i = Gx_per_grain[g_i] * R[i, 0] + Gy_per_grain[g_i] * R[i, 1]
-            phi_j = Gx_per_grain[g_j] * R[j, 0] + Gy_per_grain[g_j] * R[j, 1]
+            ux_i = R[i, 0] - coords[i, 0]
+            uy_i = R[i, 1] - coords[i, 1]
+
+            ux_j = R[j, 0] - coords[j, 0]
+            uy_j = R[j, 1] - coords[j, 1]
+
+            phi_i = Gx_per_grain[g_i] * ux_i + Gy_per_grain[g_i] * uy_i
+            phi_j = Gx_per_grain[g_j] * ux_j + Gy_per_grain[g_j] * uy_j
 
             gt[b] += np.cos(phi_i - phi_j)
             cnt[b] += 1
@@ -293,9 +304,11 @@ def compute_GT(coords, R, grain_of_atoms, Gx_per_grain, Gy_per_grain, bin_bounds
         if count_total[b] > 0:
             GT_total[b] /= count_total[b]
 
+    GT_total[0] = 1.0
+
     return GT_total
 
-def compute_translational_correlation(coords, neighbors, grain_of_atoms, grain_centers, grain_thetas, bin_bounds, L, n_samples = 10_000_000, a_CC = 1.42):
+def compute_translational_correlation(coords, neighbors, grain_of_atoms, grain_centers, grain_thetas, bin_bounds, L, n_samples = 20_000_000, a_CC = 1.42):
     '''
     Compute the translational correlation function GT(r) 
     Inputs:

@@ -12,11 +12,11 @@ alpha =         1.70            # (eV/AA)
 beta_RS =       -0.16
 
 # ____Lattice parameters____
-L =             500              # (AA)
-rho =           0.001          # (grains/AA^2)
+L =             200              # (AA)
+rho =           0.0007          # (grains/AA^2)
 
 # ____Monte Carlo parameters____
-n_monte_carlo = 300_000
+n_monte_carlo = 400_000
 
 # ____Temperature____
-T =             [4]       # (eV)
+T =             [7]       # (eV)

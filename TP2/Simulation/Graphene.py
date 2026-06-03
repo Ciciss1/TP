@@ -324,12 +324,13 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         bin_bounds = np.linspace(0, r_max, num_bins + 1)
         bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
 
+        G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds, self.L)
+
         grain_centers = self.points
         tree = cKDTree(grain_centers)
         grain_of_atoms = tree.query(self.atoms[:, :2], k=1, workers=-1)[1]
         grain_of_atoms = grain_of_atoms.astype(np.int64)
 
-        G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds, n_samples)
         GT = obs.compute_translational_correlation(self.atoms, self.neighbors, grain_of_atoms, self.points, self.theta, bin_bounds, self.L)
 
         return bin_centers, G6, GT
@@ -342,7 +343,6 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         plt.xlim(0, self.L)
         plt.ylim(0, self.L)
         plt.gca().set_aspect('equal')
-        plt.title('Graphene Crystal')
         plt.xlabel(r"$x$")
         plt.ylabel(r"$y$")
         plt.tight_layout()
@@ -358,17 +358,16 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         plt.xlim(0, self.L)
         plt.ylim(0, self.L)
         plt.gca().set_aspect('equal')
-        plt.title('Graphene Bonds')
         plt.xlabel(r"$x$")
         plt.ylabel(r"$y$")
         plt.tight_layout()
 
     def plot_all(self, fig_size = 6, dot_size = 1, lw = 0.5, atom_phase = None):
-        fig, ax = plt.subplots(figsize=(fig_size * 1.2, fig_size))
+        fig, ax = plt.subplots(figsize=(fig_size*1.25, fig_size))
 
-        lines = [(self.atoms[i, :2], self.atoms[j, :2]) for i, j in self.bonds if np.linalg.norm(self.atoms[i, :2] - self.atoms[j, :2]) < 4]
-        lc = LineCollection(lines, colors='black', linewidths=lw)
-        ax.add_collection(lc)        
+        # lines = [(self.atoms[i, :2], self.atoms[j, :2]) for i, j in self.bonds if np.linalg.norm(self.atoms[i, :2] - self.atoms[j, :2]) < 4]
+        # lc = LineCollection(lines, colors='black', linewidths=lw)
+        # ax.add_collection(lc)        
         if atom_phase is not None:
             phase_norm = atom_phase / (np.pi/3)
 
@@ -376,14 +375,13 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
 
             cbar = fig.colorbar(mp, ax=ax, ticks=[0, 0.25, 0.5, 0.75, 1])
             cbar.ax.set_yticklabels(['0', r'$\pi/12$', r'$\pi/6$', r'$\pi/4$', r'$\pi/3$'], fontsize=10)
-            cbar.ax.set_ylabel(r'$\arg(\psi_6) mod \pi/3$', fontsize=12)
+            cbar.ax.set_ylabel(r'$\arg(\psi_6) \,\mathrm{mod}\, \pi/3$', fontsize=12)
         else:
             ax.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
 
         ax.set_xlim(0, self.L)
         ax.set_ylim(0, self.L)
         ax.set_aspect('equal')
-        ax.set_title('Graphene Crystal')
         ax.set_xlabel(r"$x$")
         ax.set_ylabel(r"$y$")
         plt.tight_layout()

@@ -23,7 +23,7 @@ def energy(theta, adj_i, adj_j, adj_length, epsilon, rho, alpha, beta_RS):
     Outputs:
         energy of the system
     '''
-    H_0 = (epsilon / rho) * np.sum(theta**2)
+    H_0 = epsilon * np.sum(theta**2)
     H_int = 0.0
     for k in range(len(adj_i)):
         i = adj_i[k]
@@ -51,7 +51,7 @@ def dhamiltonian(i, theta, new_theta, adj_i, adj_j, adj_length, epsilon, rho, al
         change in energy
     '''
     old_theta = theta[i]
-    dH_0 = (epsilon / rho) * (new_theta**2 - old_theta**2)
+    dH_0 = epsilon * (new_theta**2 - old_theta**2)
     dH_int = 0.0
     for k in range(len(adj_i)):
         if adj_i[k] == i:
