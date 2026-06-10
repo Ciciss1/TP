@@ -93,9 +93,10 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, L, n_sample
         
         dx = coords[i, 0] - coords[j, 0]
         dy = coords[i, 1] - coords[j, 1]
+        dz = coords[i, 2] - coords[j, 2]
         dx -= L * np.round(dx / L)
         dy -= L * np.round(dy / L)
-        r = np.sqrt(dx * dx + dy * dy)
+        r = np.sqrt(dx * dx + dy * dy + dz * dz)
 
         b = bin_index(r, bin_bounds)
         if b < 0:
@@ -266,10 +267,11 @@ def compute_GT(coords, R, grain_of_atoms, Gx_per_grain, Gy_per_grain, bin_bounds
 
             dx = coords[i, 0] - coords[j, 0]
             dy = coords[i, 1] - coords[j, 1]
+            dz = coords[i, 2] - coords[j, 2]
             dx -= L * np.round(dx / L)
             dy -= L * np.round(dy / L)
 
-            r = np.sqrt(dx * dx + dy * dy)
+            r = np.sqrt(dx * dx + dy * dy + dz * dz)
 
             b = bin_index(r, bin_bounds)
             if b < 0:

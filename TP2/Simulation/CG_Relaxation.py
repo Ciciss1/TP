@@ -168,17 +168,13 @@ def write_lammps_input_3d(
     package omp {n_threads}
     read_data {data_file}
 
-    group free id {free_str}
-    group fixed subtract all free
-    fix freeze fixed setforce 0.0 0.0 NULL
-
     # Define potential
     pair_style airebo/omp 3.0 1 1
     pair_coeff * * {airebo_abs} C
 
     # Minimization CG
     min_style cg
-    minimize 0.0 {ftol} {max_steps} {max_steps * 10}
+    minimize 1e-6 {ftol} {max_steps} {max_steps * 10}
 
     # Output
     dump final all custom 1 {dump_file} id x y z
@@ -372,13 +368,16 @@ def minimize_CG(
         n_iter = parse_n_iterations(log_file_2d)
         # print(f"CG relaxation completed in {n_iter} iterations.")
 
+        rng = np.random.default_rng()
+        pos_2d[:, 2] += rng.uniform(-0.05, 0.05, size=len(pos_2d))
+
         write_lammps_data_3d(pos_2d, L, data_file)
         input_script_3d = write_lammps_input_3d(
             data_file=data_file,
             dump_file=dump_file_3d,
             airebo_abs=airebo_abs,
             free_indices=free_ids,
-            ftol=ftol / 10,
+            ftol=ftol,
             max_steps=max_steps,
             n_threads=n_threads
         )

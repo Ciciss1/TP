@@ -12,37 +12,38 @@ def w(message = ""):
     tqdm.write(message)
 
 def run_one_temp(args, outer_bar: tqdm):
-    T, L, epsilon, rho, alpha, beta_RS, n_monte_carlo, output_dir = args
+    T, L, epsilon, rho, alpha, beta_RS, n_monte_carlo, n_runs, output_dir = args
 
     sim_dir = os.path.join(output_dir, f"eps_{epsilon}/L_{L}/rho_{rho}/T_{T}/")
     os.makedirs(sim_dir, exist_ok=True)
 
-    outer_bar.set_postfix_str(f"T={T}  1/3 Voronoi")
-    t0 = time.perf_counter()
-    vor = PeriodicVoronoi(L, rho)
-    w(f"  [T={T:<5}]  Voronoi  {vor.N} grains  {time.perf_counter() - t0:5.2f} s")
+    for run in range(n_runs):
+        outer_bar.set_postfix_str(f"T={T}  run {run + 1}/{n_runs}  1/3 Voronoi")
+        t0 = time.perf_counter()
+        vor = PeriodicVoronoi(L, rho)
+        w(f"  [T={T:<5}]  Voronoi  {vor.N} grains  {time.perf_counter() - t0:5.2f} s")
 
-    outer_bar.set_postfix_str(f"T={T}  2/3 Monte Carlo")
-    t0 = time.perf_counter()
+        outer_bar.set_postfix_str(f"T={T}  run {run + 1}/{n_runs}  2/3 Monte Carlo")
+        t0 = time.perf_counter()
 
-    thetas, energy_history = monte_carlo(
-        vor.theta, vor.adj_i, vor.adj_j, vor.adj_length,
-        beta=1.0 / T, epsilon=epsilon, rho=rho,
-        alpha=alpha, beta_RS=beta_RS,
-        n_sweeps=n_monte_carlo, use_tqdm=False,
-    )
+        thetas, energy_history = monte_carlo(
+            vor.theta, vor.adj_i, vor.adj_j, vor.adj_length, vor.areas,
+            beta=1.0 / T, epsilon=epsilon, rho=rho,
+            alpha=alpha, beta_RS=beta_RS,
+            n_sweeps=n_monte_carlo, use_tqdm=False,
+        )
 
-    vor.theta = thetas
-    w(f"  [T={T:<5}]  Monte Carlo  E={energy_history[-1]:+.4f} eV   {time.perf_counter()-t0:5.2f}s")
+        vor.theta = thetas
+        w(f"  [T={T:<5}]  Monte Carlo  E={energy_history[-1]:+.4f} eV   {time.perf_counter()-t0:5.2f}s")
 
-    outer_bar.set_postfix_str(f"T={T}  3/3 Crystal")
-    t0 = time.perf_counter()
-    crystal = GrapheneCrystal(vor)
-    w(f"  [T={T:<5}]  Crystal      {len(crystal.atoms)} atoms          {time.perf_counter()-t0:5.2f}s")
+        outer_bar.set_postfix_str(f"T={T}  run {run + 1}/{n_runs}  3/3 Crystal")
+        t0 = time.perf_counter()
+        crystal = GrapheneCrystal(vor)
+        w(f"  [T={T:<5}]  Crystal      {len(crystal.atoms)} atoms          {time.perf_counter()-t0:5.2f}s")
     
-    save_path = os.path.join(sim_dir, "Crystal.npz")
-    crystal.save_crystal(save_path)
-    w(f"  [T={T:<5}]  Saved  →  {save_path}")
+        save_path = os.path.join(sim_dir, f"Crystal_{run + 1}.npz")
+        crystal.save_crystal(save_path)
+        w(f"  [T={T:<5} run {run + 1}]  Saved  →  {save_path}")
 
 def load_parameters(path):
     params = {}
@@ -57,6 +58,7 @@ def load_parameters(path):
         "L",
         "rho",
         "n_monte_carlo",
+        "n_runs",
         "T"
     ]
 
@@ -84,13 +86,14 @@ def main():
     L = params["L"]
     rho = params["rho"]
     n_monte_carlo = params["n_monte_carlo"]
+    n_runs = params["n_runs"]
     Ts = params["T"]
 
     os.makedirs(output_dir, exist_ok=True)
 
     w(f"  param file: {param_file}")
     w(f"  output dir: {output_dir}")
-    w(f"  epsilon: {epsilon}  alpha: {alpha}  beta_RS: {beta_RS}  L: {L}  rho: {rho}  n_MC: {n_monte_carlo}  T: {Ts}")
+    w(f"  epsilon: {epsilon}  alpha: {alpha}  beta_RS: {beta_RS}  L: {L}  rho: {rho}  n_MC: {n_monte_carlo}  n_runs: {n_runs}  T: {Ts}")
 
     t_total = time.perf_counter()
 
@@ -100,7 +103,7 @@ def main():
             t_sim = time.perf_counter()
             
             run_one_temp(
-                (T, L, epsilon, rho, alpha, beta_RS, n_monte_carlo, output_dir),
+                (T, L, epsilon, rho, alpha, beta_RS, n_monte_carlo, n_runs, output_dir),
                 outer_bar
             )
             w(f"  [T={T:<5}]  ✓ done in {time.perf_counter()-t_sim:.1f}s\n")

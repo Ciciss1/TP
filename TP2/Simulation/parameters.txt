@@ -12,11 +12,12 @@ alpha =         1.70            # (eV/AA)
 beta_RS =       -0.16
 
 # ____Lattice parameters____
-L =             200              # (AA)
+L =             200             # (AA)
 rho =           0.0007          # (grains/AA^2)
 
 # ____Monte Carlo parameters____
-n_monte_carlo = 400_000
+n_monte_carlo = 200_000
 
 # ____Temperature____
-T =             [7]       # (eV)
+T =             [4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14]       # (eV)
+n_runs =        5          # number of runs per temperature

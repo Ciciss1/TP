@@ -101,19 +101,45 @@ class PeriodicVoronoi:
         start = 4 * self.N
         end = 5 * self.N
 
-        mask = ((ridge_points[:, 0] >= start) & (ridge_points[:, 0] < end) & (ridge_points[:, 1] >= start) & (ridge_points[:, 1] < end) & (ridge_vertices[:, 0] != -1) & (ridge_vertices[:, 1] != -1))
+        i = ridge_points[:, 0]
+        j = ridge_points[:, 1]
 
-        rp = ridge_points[mask] - start
+        in_i = (i >= start) & (i < end)
+        in_j = (j >= start) & (j < end)
+
+        finite = (ridge_vertices[:, 0] != -1) & (ridge_vertices[:, 1] != -1)
+
+        gi = i % self.N
+        gj = j % self.N
+
+        interior = in_i & in_j & finite
+
+        boundary = (in_i ^ in_j) & finite & ((in_i & (gi < gj)) | (in_j & (gj < gi)))
+
+        mask = interior | boundary
         rv = ridge_vertices[mask]
+        gi = gi[mask]
+        gj = gj[mask]
 
         v1 = self.vor.vertices[rv[:, 0]]
         v2 = self.vor.vertices[rv[:, 1]]
         lengths = np.linalg.norm(v1 - v2, axis=1)
 
-        valid = lengths > 1e-6
-        self.adj_i = rp[valid, 0].astype(np.int32)
-        self.adj_j = rp[valid, 1].astype(np.int32)
-        self.adj_length = lengths[valid]
+        keep = (lengths > 1e-10) & (gi != gj)
+        self.adj_i = gi[keep].astype(np.int32)
+        self.adj_j = gj[keep].astype(np.int32)
+        self.adj_length = lengths[keep]
+
+        self.areas = np.zeros(self.N)
+        for idx in range(start, end):
+            region_idx = self.vor.point_region[idx]
+            vertices = self.vor.regions[region_idx]
+
+            if -1 in vertices or len(vertices) == 0:
+                continue
+
+            polygon = Polygon(self.vor.vertices[vertices])
+            self.areas[idx - start] = polygon.area
 
     def plot(self):
 

@@ -350,7 +350,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
     def plot_bonds(self, fig_size = 6, dot_size = 1, lw = 0.5):
         plt.figure(figsize=(fig_size, fig_size))
 
-        lines = [(self.atoms[i, :2], self.atoms[j, :2]) for i, j in self.bonds]
+        lines = [(self.atoms[i, :2], self.atoms[j, :2]) for i, j in self.bonds if np.linalg.norm(self.atoms[i, :2] - self.atoms[j, :2]) < 4]
         lc = LineCollection(lines, colors='black', linewidths=lw)
         plt.gca().add_collection(lc)
         plt.scatter(self.relaxed_generators[self.boundary_mask][:, 0], self.relaxed_generators[self.boundary_mask][:, 1], s=dot_size, color='green')
@@ -411,9 +411,9 @@ if __name__ == "__main__":
     _ = generate_triangular_lattice(10.0)
 
     configs = [
-        (120,  0.0005,  "10 grains / 120Å  — test de base"),
+        (200,  0.0007,  "10 grains / 200Å  — test de base"),
         # (200,  0.0003,  "12 grains / 200Å  — test de base"),
-        # (500,  0.0003,  "75 grains / 500Å  — polycristal moyen"),
+        # (500,  0.0007,  "75 grains / 500Å  — polycristal moyen"),
         # (500,  0.001,   "250 grains / 500Å — grains plus petits"),
         # (1000, 0.0003,  "300 grains / 1000Å — grande boîte"),
         # (1000, 0.001,   "1000 grains / 1000Å — haute densité"),
@@ -442,8 +442,15 @@ if __name__ == "__main__":
         plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_all.png", dpi=300)
         plt.close()
 
+        crystal.plot_bonds()
+        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_bonds.png", dpi=300)
+        plt.close()
+
 
         t1 = time.time()
         print(f"  Grains   : {vor.N}")
-        print(f"  Atomes   : {len(crystal.atoms):,}")
+        print(f"  Atomes   : {len(crystal.atoms):,} Shape: {crystal.atoms.shape}")
         print(f"  Temps    : {t1 - t0:.2f} s")
+
+        save_path = f"results/test_{L:.0f}_{rho:.0e}.npz"
+        crystal.save_crystal(save_path)
