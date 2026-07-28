@@ -7,9 +7,9 @@ from scipy.spatial import Voronoi, cKDTree
 from shapely.geometry import Polygon
 
 @njit
-def generate_cu_111_substrate(L, a_sub = 2.556):
+def generate_ir_111_substrate(L, a_sub = 2.715):
     '''
-    Generate a Cu(111) lattice with lattice constant a_sub
+    Generate a Ir(111) lattice with lattice constant a_sub
     Inputs:
         L : size of the box
         a_sub : lattice constant of the substrate
@@ -69,7 +69,7 @@ class PeriodicVoronoi:
         self.rho = rho
         self.N = max(1, int(rho * L * L))
 
-        self.points = pick_substrate_points(np.array(generate_cu_111_substrate(2 * L)), self.N, L)
+        self.points = pick_substrate_points(np.array(generate_ir_111_substrate(2 * L)), self.N, L)
                
         self.build_periodic_voronoi()
         self.get_adjacency()
