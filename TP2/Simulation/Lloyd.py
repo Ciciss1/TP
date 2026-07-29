@@ -19,7 +19,7 @@ def polygon_centroid(vertices):
     cy = np.sum((y + np.roll(y, -1)) * cross) / (6 * A)
     return np.array([cx, cy])
 
-def relaxation_CPU(L, generators, boundary_mask, n_iter = 200, tol = 1e-3):
+def relaxation_CPU(L, generators, boundary_mask, n_iter = 1000, tol = 1e-2, step_size = 0.99):
     '''
     Minimize the distance between the generators and the centroids of their Voronoi cells using Lloyd's algorithm
     Inputs:
@@ -58,7 +58,7 @@ def relaxation_CPU(L, generators, boundary_mask, n_iter = 200, tol = 1e-3):
             verts = verts - L * np.round((verts - ref) / L)
 
             centroid = polygon_centroid(verts)
-            new_positions[idx] = centroid % L
+            new_positions[idx] = (ref + step_size * (centroid - ref)) % L
 
         delta = np.max(np.linalg.norm(new_positions[free_idx] - generators_relax[free_idx], axis=1))
         generators_relax = new_positions
@@ -72,6 +72,6 @@ def relaxation_CPU(L, generators, boundary_mask, n_iter = 200, tol = 1e-3):
 
 class Lloyd:
 
-    def relaxation(self, generators, boundary_mask, n_iter = 50, tol = 1e-3):
+    def relaxation(self, generators, boundary_mask, n_iter = 1000, tol = 1e-2, step_size = 0.99):
         
-        return relaxation_CPU(self.L, generators, boundary_mask, n_iter, tol)
+        return relaxation_CPU(self.L, generators, boundary_mask, n_iter, tol, step_size)

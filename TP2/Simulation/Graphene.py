@@ -369,12 +369,12 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         # lc = LineCollection(lines, colors='black', linewidths=lw)
         # ax.add_collection(lc)        
         if atom_phase is not None:
-            phase_norm = atom_phase / (np.pi/3)
+            phase_norm = (atom_phase + np.pi) / (2 * np.pi)
 
             mp = ax.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, c=phase_norm, cmap='hsv', vmin=0, vmax=1, zorder=2)
 
             cbar = fig.colorbar(mp, ax=ax, ticks=[0, 0.25, 0.5, 0.75, 1])
-            cbar.ax.set_yticklabels(['0', r'$\pi/12$', r'$\pi/6$', r'$\pi/4$', r'$\pi/3$'], fontsize=10)
+            cbar.ax.set_yticklabels([r'$-\pi$', r'$-\pi/2$', r'$0$', r'$\pi/2$', r'$\pi$'], fontsize=10)
             cbar.ax.set_ylabel(r'$\arg(\psi_6) \,\mathrm{mod}\, \pi/3$', fontsize=12)
         else:
             ax.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')

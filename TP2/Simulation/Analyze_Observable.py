@@ -35,7 +35,7 @@ def grain_energy(crystal, epsilon, alpha, beta_RS):
     N = len(theta)
     return (H_0 + H_int) / N, H_0 / N, H_int / N, per_bond
 
-def shannon_entropy(angles, n_bins=100, range=(0, np.pi/3)):
+def shannon_entropy(angles, n_bins=100, range=(-np.pi, np.pi)):
     counts, _ = np.histogram(angles, bins=n_bins, range=range)
     probs = counts / counts.sum()
     probs = probs[probs > 0]
@@ -105,7 +105,6 @@ def analyze_observable(L, epsilon, rho, fig_size = 6, dot_size = 1, lw = 0.5, re
                 psi_6_i = obs.compute_psi6(i, crystal.atoms, crystal.neighbors, crystal.L)
                 psi_6_values.append(psi_6_i)
                 angle = np.angle(psi_6_i)
-                angle = angle % (np.pi/3)
                 angles.append(angle)
 
             angles = np.array(angles)
