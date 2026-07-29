@@ -19,7 +19,7 @@ def polygon_centroid(vertices):
     cy = np.sum((y + np.roll(y, -1)) * cross) / (6 * A)
     return np.array([cx, cy])
 
-def relaxation_CPU(L, generators, boundary_mask, n_iter = 1000, tol = 1e-2, step_size = 0.99):
+def relaxation_CPU(L, generators, boundary_mask, n_iter = 1000, tol = 1e-2, step_size = 0.99, pad = 15.0):
     '''
     Minimize the distance between the generators and the centroids of their Voronoi cells using Lloyd's algorithm
     Inputs:
@@ -28,6 +28,8 @@ def relaxation_CPU(L, generators, boundary_mask, n_iter = 1000, tol = 1e-2, step
         boundary_mask : boolean mask indicating which generators are close to the boundaries
         n_iter : maximum number of iterations
         tol : tolerance for convergence
+        step_size : step size for the update
+        pad : padding for the Voronoi diagram to avoid boundary effects
     Outputs:
         relaxed_generators : coordinates of the relaxed generators
     '''
@@ -36,18 +38,23 @@ def relaxation_CPU(L, generators, boundary_mask, n_iter = 1000, tol = 1e-2, step
     N = len(generators_relax)
 
     for it in range(n_iter):
-        t0 = time.perf_counter()
-        images = [generators_relax + np.array([dx, dy]) 
-                    for dx in [-L, 0, L]
-                    for dy in [-L, 0, L]]
+        near_edge = ((generators_relax[:, 0] < pad) | (generators_relax[:, 0] > L - pad) | (generators_relax[:, 1] < pad) | (generators_relax[:, 1] > L - pad))
+        edge_pts = generators_relax[near_edge]
+
+        images = [generators_relax]
+        for dx in [-L, 0, L]:
+            for dy in [-L, 0, L]:
+                if dx == 0 and dy == 0:
+                    continue
+                images.append(edge_pts + np.array([dx, dy]))
         all_gen = np.vstack(images)
         vor = Voronoi(all_gen)
 
-        new_positions = generators_relax.copy()
         point_region = np.array(vor.point_region)
+        new_positions = generators_relax.copy()
 
         for idx in free_idx:
-            region = vor.regions[point_region[idx + 4*N]]
+            region = vor.regions[point_region[idx]]
 
             if -1 in region or len(region) == 0:
                 continue

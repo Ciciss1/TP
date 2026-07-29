@@ -8,6 +8,8 @@ output_dir =    "results/"
 
 # ____Hamiltonian parameters____
 epsilon =       0.0
+gamma =         0.0
+phi_s =         0.0
 alpha =         1.70            # (eV/AA)
 beta_RS =       -0.16
 
