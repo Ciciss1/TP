@@ -10,7 +10,7 @@ C_MASS = 12.011
 
 def check_lammps_installation():
     import shutil
-    if shutil.which("lammps") is None:
+    if shutil.which("lmp") is None:
         raise RuntimeError("LAMMPS executable not found. Please ensure LAMMPS is installed and in your PATH.")
 
 def atom_boundary_mask_from_generators(
@@ -341,7 +341,7 @@ def minimize_CG(
             f.write(input_script_2d)
 
         cmd = [
-            "lammps",
+            "lmp",
             "-in", input_file_2d,
             "-log", log_file_2d,
             "-pk", "omp", str(n_threads),
@@ -385,7 +385,7 @@ def minimize_CG(
             f.write(input_script_3d)
 
         cmd = [
-            "lammps",
+            "lmp",
             "-in", input_file_3d,
             "-log", log_file_3d,
             "-pk", "omp", str(n_threads),

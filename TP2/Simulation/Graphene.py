@@ -138,7 +138,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         self.points = voronoi.points
         self.all_points = voronoi.all_points
         self.theta = voronoi.theta
-        self.build_polycrystal(a)
+        self.build_polycrystal(a, margin = 5)
 
     def remove_close_generators(self, generators, min_dist = 0.5):
         tree = cKDTree(generators)
@@ -252,8 +252,11 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
             n_iter : maximum number of iterations for relaxation
             tol : tolerance for convergence of relaxation
         '''
+
         # Generate base Lattice
-        base_lattice = generate_triangular_lattice(self.L, a_CC)
+        mean_grain_radius = 1 / np.sqrt(np.pi * self.lattice.rho)
+        patch_L = min(self.L, 6 * mean_grain_radius)
+        base_lattice = generate_triangular_lattice(patch_L, a_CC)
         all_generators = []
 
         # Construct the generators for each grain by rotating and moving the base lattice
@@ -270,10 +273,16 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
             if (max_x < 0 or min_x > self.L or max_y < 0 or min_y > self.L):
                 continue
 
+            diag = np.hypot(max_x - min_x, max_y - min_y)
+            if diag > patch_L:
+                src = generate_triangular_lattice(diag + 4 * a_CC, a_CC)
+            else:
+                src = base_lattice
+            
             theta = self.theta[grain % self.N]
             center = self.all_points[grain]
             
-            rot_atoms = rotate_and_move_atoms(base_lattice, theta, center)
+            rot_atoms = rotate_and_move_atoms(src, theta, center)
 
             mask = (rot_atoms[:, 0] >= min_x) & (rot_atoms[:, 0] <= max_x) & (rot_atoms[:, 1] >= min_y) & (rot_atoms[:, 1] <= max_y)
 
@@ -321,7 +330,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         r_max = self.L / 2
         dr = a * np.sqrt(3) / 2
         num_bins = int(r_max / dr)
-        bin_bounds = np.linspace(0, r_max, num_bins + 1)
+        bin_bounds = np.geomspace(a * 0.5, r_max, num_bins + 1)
         bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
 
         G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds, self.L)
@@ -433,7 +442,7 @@ if __name__ == "__main__":
         angles = []
         for i, atom in enumerate(crystal.atoms):
             psi_6_i = obs.compute_psi6(i, crystal.atoms, crystal.neighbors, crystal.L)
-            angle = np.angle(psi_6_i) % (np.pi / 3)
+            angle = np.angle(psi_6_i)
             angles.append(angle)
 
         angles = np.array(angles)

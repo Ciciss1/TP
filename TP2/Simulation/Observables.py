@@ -62,10 +62,50 @@ def compute_psi6(i, atoms, neighbors, L):
         sum_psi += np.exp(6j * theta)
         cnt += 1
     psi6 = sum_psi / cnt if cnt > 0 else 0.0 + 0.0j
-    return psi6            
+    return psi6
 
-@njit
-def compute_orientational_correlation(coords, neighbors, bin_bounds, L, n_samples = 10_000_000):
+@njit(parallel=True)
+def accumulate_G6(ref_idx, coords, psi6_values, bin_bounds, L):
+    """
+    Accumulate the orientational correlation function G6(r) for a set of reference atoms
+    Inputs:
+        ref_idx : indices of the reference atoms
+        coords : coordinates of the atoms
+        psi6_values : local orientational order parameters for each atom
+        bin_bounds : array of bin boundaries
+        L : size of the system
+    Outputs:
+        G6 : orientational correlation function for each bin
+    """
+    N = len(coords)
+    num_bins = len(bin_bounds) - 1
+    n_ref = len(ref_idx)
+
+    G6_sum = np.zeros((n_ref, num_bins), dtype=np.float64)
+    counts = np.zeros((n_ref, num_bins), dtype=np.int64)
+
+    for ii in prange(n_ref):
+        i = ref_idx[ii]
+        xi, yi, zi = coords[i, 0], coords[i, 1], coords[i, 2]
+        psi6_i = psi6_values[i]
+
+        for j in range(N):
+            dx = coords[j, 0] - xi
+            dy = coords[j, 1] - yi
+            dz = coords[j, 2] - zi
+            dx -= L * np.round(dx / L)
+            dy -= L * np.round(dy / L)
+            r = np.sqrt(dx * dx + dy * dy + dz * dz)
+
+            b = bin_index(r, bin_bounds)
+            if b < 0:
+                continue
+
+            psi6_j = psi6_values[j]
+            G6_sum[ii, b] += psi6_i.real * psi6_j.real + psi6_i.imag * psi6_j.imag
+            counts[ii, b] += 1        
+
+def compute_orientational_correlation(coords, neighbors, bin_bounds, L, n_ref = 500):
     '''
     Compute the orientational correlation function G6(r) 
     Inputs:
@@ -73,50 +113,28 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, L, n_sample
         neighbors : list of nearest neighbors for each atom
         bin_bounds : array of bin boundaries
         L : size of the system
-        n_samples : number of samples to use for the correlation function
+        n_ref : number of reference sites to use for the correlation function
     Outputs:
         G6 : orientational correlation function for each bin
     '''
     N = len(coords)
     num_bins = len(bin_bounds) - 1
 
-    G6_re = np.zeros(num_bins, dtype=np.float64)
-    count = np.zeros(num_bins, dtype=np.int64)
-
     psi6_values = np.empty(N, dtype=np.complex128)
     for i in range(N):
         psi6_values[i] = compute_psi6(i, coords, neighbors, L)
 
-    for _ in range(n_samples):
-        i = np.random.randint(0, N)
-        j = np.random.randint(0, N)
-        
-        dx = coords[i, 0] - coords[j, 0]
-        dy = coords[i, 1] - coords[j, 1]
-        dz = coords[i, 2] - coords[j, 2]
-        dx -= L * np.round(dx / L)
-        dy -= L * np.round(dy / L)
-        r = np.sqrt(dx * dx + dy * dy + dz * dz)
+    if n_ref >= N:
+        ref_idx = np.arange(N, dtype=np.int64)
+    else:
+        ref_idx = np.random.choice(N, n_ref, replace=False).astype(np.int64)
 
-        b = bin_index(r, bin_bounds)
-        if b < 0:
-            continue
-
-        psi6_i = psi6_values[i]
-        psi6_j = psi6_values[j]
-
-        val_re = psi6_i.real * psi6_j.real + psi6_i.imag * psi6_j.imag
-
-        G6_re[b] += val_re
-        count[b] += 1
-
-    G6 = np.zeros(num_bins, dtype=np.float64)
-    for b in range(num_bins):
-        if count[b] > 0:
-            G6[b] = G6_re[b] / count[b]
-    
+    G6 = accumulate_G6(ref_idx, 
+                       np.ascontiguousarray(coords, dtype=np.float64),
+                       psi6_values,
+                       np.ascontiguousarray(bin_bounds, dtype=np.float64),
+                       L)
     G6[0] = 1.0
-    
     return G6
 
 @njit
