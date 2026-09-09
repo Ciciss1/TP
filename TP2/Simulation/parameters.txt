@@ -4,22 +4,22 @@
 
 
 # ____File directory____
-output_dir =    "results/"
+output_dir =    "publication/"
 
 # ____Hamiltonian parameters____
-epsilon =       0.0
-gamma =         0.0
-phi_s =         0.0
+epsilon =       1.71/5.24*1e-3
+gamma =         0.962
+phi_s =         6.874/180*3.141592653589793
 alpha =         1.70            # (eV/AA)
-beta_RS =       -0.16
+beta_RS =       -0.161
 
 # ____Lattice parameters____
-L =             200             # (AA)
-rho =           0.0007          # (grains/AA^2)
+L =             500             # (AA)
+rho =           0.0016          # (grains/AA^2)
 
 # ____Monte Carlo parameters____
-n_monte_carlo = 200_000
+n_monte_carlo = 100_000
 
 # ____Temperature____
-T =             [4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14]       # (eV)
-n_runs =        5          # number of runs per temperature
+T =             [100, 90, 80, 75, 70, 65, 60, 50, 40] # (mK)
+n_runs =        1          

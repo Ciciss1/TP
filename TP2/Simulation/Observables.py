@@ -81,7 +81,8 @@ def accumulate_G6(ref_idx, coords, psi6_values, bin_bounds, L):
     num_bins = len(bin_bounds) - 1
     n_ref = len(ref_idx)
 
-    G6_sum = np.zeros((n_ref, num_bins), dtype=np.float64)
+    s1 = np.zeros((n_ref, num_bins), dtype=np.float64)
+    s2 = np.zeros((n_ref, num_bins), dtype=np.float64)
     counts = np.zeros((n_ref, num_bins), dtype=np.int64)
 
     for ii in prange(n_ref):
@@ -102,8 +103,25 @@ def accumulate_G6(ref_idx, coords, psi6_values, bin_bounds, L):
                 continue
 
             psi6_j = psi6_values[j]
-            G6_sum[ii, b] += psi6_i.real * psi6_j.real + psi6_i.imag * psi6_j.imag
-            counts[ii, b] += 1        
+            val = np.real(psi6_i * np.conj(psi6_j))
+            s1[ii, b] += val
+            s2[ii, b] += val * val
+            counts[ii, b] += 1
+
+    G6 = np.zeros(num_bins, dtype=np.float64)
+    VarG6 = np.zeros(num_bins, dtype=np.float64)
+    for b in range(num_bins):
+        tot_s1 = 0.0
+        tot_s2 = 0.0
+        tot_c = 0
+        for ii in range(n_ref):
+            tot_s1 += s1[ii, b]
+            tot_s2 += s2[ii, b]
+            tot_c += counts[ii, b]
+        if tot_c > 0:
+            G6[b] = tot_s1 / tot_c
+            VarG6[b] = tot_s2 / tot_c - G6[b] ** 2
+    return G6, VarG6
 
 def compute_orientational_correlation(coords, neighbors, bin_bounds, L, n_ref = 500):
     '''
@@ -129,13 +147,13 @@ def compute_orientational_correlation(coords, neighbors, bin_bounds, L, n_ref = 
     else:
         ref_idx = np.random.choice(N, n_ref, replace=False).astype(np.int64)
 
-    G6 = accumulate_G6(ref_idx, 
+    G6, VarG6 = accumulate_G6(ref_idx, 
                        np.ascontiguousarray(coords, dtype=np.float64),
                        psi6_values,
                        np.ascontiguousarray(bin_bounds, dtype=np.float64),
                        L)
     G6[0] = 1.0
-    return G6
+    return G6, VarG6
 
 @njit
 def build_reference_sites(cx, cy, cos_t, sin_t, L, a_CC = 1.42, sublattice = 'A'):

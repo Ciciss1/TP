@@ -323,27 +323,6 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         del self.vor
         del self.all_points
 
-    def compute_observables(self, a = 1.42, n_samples = 5_000_000):
-        '''
-        Compute the observables for the graphene crystal
-        '''
-        r_max = self.L / 2
-        dr = a * np.sqrt(3) / 2
-        num_bins = int(r_max / dr)
-        bin_bounds = np.geomspace(a * 0.5, r_max, num_bins + 1)
-        bin_centers = 0.5 * (bin_bounds[:-1] + bin_bounds[1:])
-
-        G6 = obs.compute_orientational_correlation(self.atoms, self.neighbors, bin_bounds, self.L)
-
-        grain_centers = self.points
-        tree = cKDTree(grain_centers)
-        grain_of_atoms = tree.query(self.atoms[:, :2], k=1, workers=-1)[1]
-        grain_of_atoms = grain_of_atoms.astype(np.int64)
-
-        GT = obs.compute_translational_correlation(self.atoms, self.neighbors, grain_of_atoms, self.points, self.theta, bin_bounds, self.L)
-
-        return bin_centers, G6, GT
-
     def plot_atoms(self, fig_size = 6, dot_size = 1):
 
         plt.figure(figsize=(fig_size, fig_size))

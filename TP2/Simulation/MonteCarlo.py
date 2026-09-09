@@ -211,7 +211,7 @@ def monte_carlo(theta, adj_i, adj_j, adj_length, areas, beta, epsilon, gamma, ph
             tau_E = estimate_tau_int(energy_history[-window:])
             tau_misor = estimate_tau_int(misor_history[-window:])
 
-            window = int(max(thermodynamic_window*2, 50*max(tau_E, tau_misor)) * 0.3 + window * 0.7)
+            window = int(max(thermodynamic_window*2, 4 * min_eff_samples * max(tau_E, tau_misor)))
 
             mean_E = np.mean(energy_history[-thermodynamic_window:])
             mean_misor = np.mean(misor_history[-thermodynamic_window:])
