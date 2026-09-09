@@ -21,24 +21,25 @@ def run_one_run(run_idx, args, outer_bar: tqdm):
 
     outer_bar.set_postfix_str(f"run {run_idx + 1} Voronoi")
     vor = PeriodicVoronoi(L, rho)
-    theta = vor.theta.copy()
+    theta_prev = vor.theta.copy()
 
     for T in T_sorted:
-        sim_dir = os.path.join(output_dir, f"eps_{epsilon}/L_{L}/rho_{rho}/T_{T}/")
+        sim_dir = os.path.join(output_dir, f"eps_{epsilon:.4f}/L_{L}/rho_{rho}/T_{T:.4f}/")
         os.makedirs(sim_dir, exist_ok=True)
 
         outer_bar.set_postfix_str(f"run {run_idx + 1} : T={T} Monte Carlo")
 
-        thetas, energy_history, misor_history = monte_carlo(
-            theta, vor.adj_i, vor.adj_j, vor.adj_length, vor.areas, beta=1.0 / T, epsilon=epsilon, gamma=gamma, phi_s2=phi_s2, phi_s4=phi_s4, alpha=alpha, beta_RS=beta_RS, n_sweeps=n_monte_carlo, use_tqdm=False
+        theta, energy_history, misor_history = monte_carlo(
+            theta_prev, vor.adj_i, vor.adj_j, vor.adj_length, vor.areas, beta=1.0 / T, epsilon=epsilon, gamma=gamma, phi_s2=phi_s2, phi_s4=phi_s4, alpha=alpha, beta_RS=beta_RS, n_sweeps=n_monte_carlo, use_tqdm=False
         )
         w(f"  [run {run_idx + 1} T={T}]  Monte Carlo  E={energy_history[-1]:+.4f} eV")
 
-        vor.theta = thetas.copy()
+        theta_prev = theta.copy()
+        vor.theta = theta_prev
 
         outer_bar.set_postfix_str(f"run {run_idx + 1} : T={T} Crystal")
 
-        crystal = GrapheneCrystal(vor)
+        crystal = GrapheneCrystal(vor, a = 1.3967512290507305)
         w(f"  [run {run_idx + 1} T={T}]  Crystal      {len(crystal.atoms)} atoms")
 
         save_path = os.path.join(sim_dir, f"Crystal_{run_idx + 1}.npz")
@@ -73,6 +74,9 @@ def load_parameters(path):
         params["T"] = [float(T_raw)]
     else:
         params["T"] = list(T_raw)
+
+    params["T"] = [T * 1000 for T in params["T"]]
+    params["T"] = [T * 8.61732814974056E-05 for T in params["T"]] # Convert mK to eV
 
     return params
 
