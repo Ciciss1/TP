@@ -1,439 +1,219 @@
 import os
+import shutil
 import subprocess
 import tempfile
 import numpy as np
 from scipy.spatial import cKDTree
 
-N_TRHEADS = 6
+N_THREADS = 6
 Z_VACUUM = 10.0
 C_MASS = 12.011
 
-def check_lammps_installation():
-    import shutil
-    if shutil.which("lmp") is None:
-        raise RuntimeError("LAMMPS executable not found. Please ensure LAMMPS is installed and in your PATH.")
+# Stage 1 (planar, only atoms near the grain boundaries move): REBO only (AIREBO with the LJ and
+# torsion terms switched off). The LJ term is the expensive part of AIREBO and is irrelevant for
+# an in-plane pre-relaxation of the bond network.
+PAIR_2D = "airebo 3.0 0 0"
+# Stage 2 (3D, all atoms): full AIREBO
+PAIR_3D = "airebo 3.0 1 1"
 
-def atom_boundary_mask_from_generators(
-        atoms: np.ndarray,
-        generators: np.ndarray,
-        generator_boundary_mask: np.ndarray,
-    ) -> np.ndarray:
+
+def check_lammps_installation(lmp="lmp"):
+    if shutil.which(lmp) is None:
+        raise RuntimeError(f"LAMMPS executable '{lmp}' not found. Please ensure LAMMPS is installed and in your PATH.")
+
+
+def atom_boundary_mask_from_generators(atoms, generators, generator_boundary_mask, L):
     '''
-    Create a mask for atoms that are on the boundary of the Voronoi cells defined by the generators.
+    Mask of the atoms whose nearest generator is a free (boundary) generator
     Inputs:
-        atoms: atomic positions
-        generators: positions of the Voronoi generators
-        generator_boundary_mask: mask for generators that are on the boundary
+        atoms : atomic positions
+        generators : positions of the generators (in [0, L))
+        generator_boundary_mask : mask of the free generators
+        L : box size
     Outputs:
-        mask for atoms that are on the boundary
+        mask of the atoms that are free to move in the planar stage
     '''
-    tree = cKDTree(generators)
-    _, nearest_gen = tree.query(atoms[:, :2], k=1)
-    return generator_boundary_mask[nearest_gen]
+    tree = cKDTree(np.mod(generators, L), boxsize=L)
+    _, nearest = tree.query(np.mod(atoms[:, :2], L), k=1)
+    return generator_boundary_mask[nearest]
 
-def write_lammps_data_2d(
-        atoms: np.ndarray,
-        L: float,
-        path: str
-    ):
+
+def write_lammps_data(atoms, types, L, path):
     '''
-    Write atomic positions to a LAMMPS data file.
-    Inputs:
-        atoms: atomic positions
-        L: box size
-        path: path to the output LAMMPS data file
+    Write the atoms to a LAMMPS data file (type 1 = free, type 2 = fixed during the planar stage)
     '''
     N = len(atoms)
-    with open(path, 'w') as f:
-        f.write("Graphene polycrystal\n\n")
-        f.write(f"{N} atoms\n")
-        f.write("1 atom types\n\n")
-        f.write(f"0 {L:.6f} xlo xhi\n")
-        f.write(f"0 {L:.6f} ylo yhi\n")
-        f.write(f"-{Z_VACUUM} {Z_VACUUM} zlo zhi\n\n")
-        f.write("Masses\n\n")
-        f.write(f"1 {C_MASS:.6f}\n\n")
-        f.write("Atoms\n\n")
-        for i, (x, y, z) in enumerate(atoms):
-            f.write(f"{i+1} 1 {x:.8f} {y:.8f} {z:.8f}\n")
-
-def write_lammps_data_3d(
-        atoms: np.ndarray,
-        L: float,
-        path: str
-    ):
-    '''
-    Write atomic positions to a LAMMPS data file.
-    Inputs:
-        atoms: atomic positions
-        L: box size
-        path: path to the output LAMMPS data file
-    '''
-    N = len(atoms)
-    with open(path, 'w') as f:
-        f.write("Graphene polycrystal\n\n")
-        f.write(f"{N} atoms\n")
-        f.write("1 atom types\n\n")
-        f.write(f"0 {L:.6f} xlo xhi\n")
-        f.write(f"0 {L:.6f} ylo yhi\n")
-        f.write(f"-{Z_VACUUM} {Z_VACUUM} zlo zhi\n\n")
-        f.write("Masses\n\n")
-        f.write(f"1 {C_MASS:.6f}\n\n")
-        f.write("Atoms\n\n")
-        for i, (x, y, z) in enumerate(atoms):
-            f.write(f"{i+1} 1 {x:.8f} {y:.8f} {z:.8f}\n")
-
-def write_lammps_input_2d(
-        data_file: str,
-        dump_file: str,
-        airebo_abs: str,
-        free_indices: np.ndarray,
-        ftol: float,
-        max_steps: int,
-        n_threads: int
-    ) -> str:
-    '''
-    Write a LAMMPS input script for energy minimization using the AIREBO potential.
-    Inputs:
-        data_file: path to the LAMMPS data file
-        dump_file: path to the LAMMPS dump file for output
-        airebo_abs: absolute path to the AIREBO potential file
-        free_indices: indices of atoms that should be free to move during minimization
-        ftol: force tolerance for convergence
-        max_steps: maximum number of minimization steps
-        n_threads: number of threads to use for LAMMPS
-    Outputs:
-        path to the generated LAMMPS input script
-    '''
-    free_str = " ".join(str(i) for i in free_indices)
-    script = f"""
-    # Setup
-    units metal
-    atom_style atomic
-    boundary p p p
-
-    package omp {n_threads}
-    read_data {data_file}
-
-    group free id {free_str}
-    group fixed subtract all free
-    fix freeze fixed setforce 0.0 0.0 0.0
-
-    # Define potential
-    
-    pair_style airebo/omp 3.0 1 1
-    pair_coeff * * {airebo_abs} C
-
-    # Minimization CG
-    min_style cg
-    minimize 0.0 {ftol} {max_steps} {max_steps * 10}
-
-    # Output
-    dump final all custom 1 {dump_file} id x y z
-    dump_modify final sort id
-    run 0
-    undump final
-    """
-    return script
-
-def write_lammps_input_3d(
-        data_file: str,
-        dump_file: str,
-        airebo_abs: str,
-        free_indices: np.ndarray,
-        ftol: float,
-        max_steps: int,
-        n_threads: int
-    ) -> str:
-    '''
-    Write a LAMMPS input script for energy minimization using the AIREBO potential.
-    Inputs:
-        data_file: path to the LAMMPS data file
-        dump_file: path to the LAMMPS dump file for output
-        airebo_abs: absolute path to the AIREBO potential file
-        free_indices: indices of atoms that should be free to move during minimization
-        ftol: force tolerance for convergence
-        max_steps: maximum number of minimization steps
-        n_threads: number of threads to use for LAMMPS
-    Outputs:
-        path to the generated LAMMPS input script
-    '''
-    free_str = " ".join(str(i) for i in free_indices)
-    script = f"""
-    # Setup
-    units metal
-    atom_style atomic
-    boundary p p p
-
-    package omp {n_threads}
-    read_data {data_file}
-
-    # Define potential
-    pair_style airebo/omp 3.0 1 1
-    pair_coeff * * {airebo_abs} C
-
-    # Minimization CG
-    min_style cg
-    minimize 1e-6 {ftol} {max_steps} {max_steps * 10}
-
-    # Output
-    dump final all custom 1 {dump_file} id x y z
-    dump_modify final sort id
-    run 0
-    undump final
-    """
-    return script
-
-def read_lammps_dump_2d(
-        dump_file: str,
-        atoms: np.ndarray,
-        boundary_mask: np.ndarray,
-        L: float
-    ) -> np.ndarray:
-    '''
-    Read atomic positions from a LAMMPS dump file and update the positions
-    Inputs:
-        dump_file: path to the LAMMPS dump file
-        atoms: original atomic positions
-        boundary_mask: mask for atoms that are on the boundary
-        L: box size
-    Outputs:
-        updated atomic positions
-    '''
     pos = atoms.copy()
+    pos[:, 0] = np.mod(pos[:, 0], L)
+    pos[:, 1] = np.mod(pos[:, 1], L)
+    with open(path, "w") as f:
+        f.write("Graphene polycrystal\n\n")
+        f.write(f"{N} atoms\n")
+        f.write("2 atom types\n\n")
+        f.write(f"0 {L:.6f} xlo xhi\n")
+        f.write(f"0 {L:.6f} ylo yhi\n")
+        f.write(f"-{Z_VACUUM} {Z_VACUUM} zlo zhi\n\n")
+        f.write("Masses\n\n")
+        f.write(f"1 {C_MASS:.6f}\n2 {C_MASS:.6f}\n\n")
+        f.write("Atoms\n\n")
+        table = np.column_stack([np.arange(1, N + 1), types, pos[:, 0], pos[:, 1], pos[:, 2]])
+        np.savetxt(f, table, fmt="%d %d %.8f %.8f %.8f")
 
-    with open(dump_file) as f:
-        lines = f.readlines()
-        
-    data_start = None
 
-    for i, line in enumerate(lines):
-        if "ITEM: ATOMS" in line:
-            data_start = i + 1
-            break
+def write_lammps_input(data_file, dump_file, airebo_abs, ftol, max_steps_2d, max_steps_3d,
+                       etol_2d, etol_3d, z_noise, seed, pair_2d, pair_3d, min_style, skin):
+    '''
+    LAMMPS script running both relaxation stages in a single process:
+        1. planar minimisation, only the type-1 atoms move, z frozen
+        2. random z displacement, then 3D minimisation of all atoms
+    '''
+    return f"""
+units           metal
+atom_style      atomic
+boundary        p p p
+read_data       {data_file}
 
-    if data_start is None:
-        raise ValueError("Could not find atomic data in LAMMPS dump file.")
-    
-    for line in lines[data_start:]:
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        atom_id = int(parts[0]) - 1
-        if boundary_mask[atom_id]:
-            pos[atom_id, 0] = float(parts[1])
-            pos[atom_id, 1] = float(parts[2])
+neighbor        {skin} bin
+neigh_modify    delay 0 every 1 check yes
+thermo          0
 
+group           fixed type 2
+
+# ---------- Stage 1 : planar relaxation of the grain boundaries ----------
+pair_style      {pair_2d}
+pair_coeff      * * {airebo_abs} C C
+fix             freeze fixed setforce 0.0 0.0 0.0
+fix             planar all setforce NULL NULL 0.0
+min_style       {min_style}
+minimize        {etol_2d} {ftol} {max_steps_2d} {10 * max_steps_2d}
+unfix           freeze
+unfix           planar
+
+# ---------- Stage 2 : out-of-plane relaxation of all atoms ----------
+displace_atoms  all random 0.0 0.0 {z_noise} {seed} units box
+pair_style      {pair_3d}
+pair_coeff      * * {airebo_abs} C C
+min_style       {min_style}
+minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
+
+write_dump      all custom {dump_file} id x y z modify sort id
+"""
+
+
+def read_lammps_dump(dump_file, N, L):
+    '''
+    Read the positions written by write_dump (sorted by id)
+    '''
+    data = np.loadtxt(dump_file, skiprows=9)
+    if data.ndim == 1:
+        data = data[None, :]
+    if len(data) != N:
+        raise RuntimeError(f"LAMMPS dump contains {len(data)} atoms, expected {N}.")
+    pos = np.empty((N, 3))
+    ids = data[:, 0].astype(np.int64) - 1
+    pos[ids] = data[:, 1:4]
+    pos[:, 0] = np.mod(pos[:, 0], L)
+    pos[:, 1] = np.mod(pos[:, 1], L)
     return pos
 
-def read_lammps_dump_3d(
-        dump_file: str,
-        atoms: np.ndarray,
-        boundary_mask: np.ndarray,
-        L: float
-    ) -> np.ndarray:
+
+def parse_minimization_stats(log_file):
     '''
-    Read atomic positions from a LAMMPS dump file and update the positions
-    Inputs:
-        dump_file: path to the LAMMPS dump file
-        atoms: original atomic positions
-        boundary_mask: mask for atoms that are on the boundary
-        L: box size
-    Outputs:
-        updated atomic positions
+    Extract, for each minimize command, the stopping criterion, the number of iterations
+    and the final force two-norm from the LAMMPS log
     '''
-    pos = np.zeros((len(atoms), 3))
-
-    with open(dump_file) as f:
-        lines = f.readlines()
-
-    data_start = next(i + 1 for i, line in enumerate(lines) if "ITEM: ATOMS" in line)
-
-    for line in lines[data_start:]:
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        atom_id = int(parts[0]) - 1
-        pos[atom_id, 0] = float(parts[1])
-        pos[atom_id, 1] = float(parts[2])
-        pos[atom_id, 2] = float(parts[3])
-
-    return pos
-
-def parse_n_iterations(log_file: str) -> int:
-    '''
-    Parse the number of iterations taken for convergence from the LAMMPS log file.
-    Inputs:
-        log_file: path to the LAMMPS log file
-    Outputs:
-        number of iterations taken for convergence
-    '''
+    stats = {"criterion": [], "iterations": [], "fnorm_final": [], "energy_final": []}
     if not os.path.isfile(log_file):
-        print(f"Log file {log_file} not found.")
-        return -1
+        return stats
     with open(log_file) as f:
-        for line in f:
-            if "Iterations" in line and "=" in line:
-                try:
-                    return int(line.split("=")[-1].strip().split()[0])
-                except ValueError:
-                    print(f"Could not parse iterations from line: {line}")
-    print("Could not find iteration information in log file.")
-    return -1
+        lines = f.readlines()
+    for k, line in enumerate(lines):
+        if "Stopping criterion =" in line:
+            stats["criterion"].append(line.split("=", 1)[1].strip())
+        elif "Iterations, force evaluations =" in line:
+            stats["iterations"].append(int(line.split("=", 1)[1].split()[0]))
+        elif "Force two-norm initial, final =" in line:
+            stats["fnorm_final"].append(float(line.split("=", 1)[1].split()[1]))
+        elif "Energy initial, next-to-last, final =" in line and k + 1 < len(lines):
+            stats["energy_final"].append(float(lines[k + 1].split()[-1]))
+    return stats
 
-def minimize_CG(
-        atoms: np.ndarray,
-        L: float,
-        generators: np.ndarray,
-        generator_boundary_mask: np.ndarray,
-        ftol: float = 0.1,
-        max_steps: int = 150,
-        airebo_file: str = "CH.airebo",
-        n_threads: int = N_TRHEADS
-    ) -> np.ndarray:
+
+def minimize_CG(atoms, L, generators, generator_boundary_mask,
+                ftol=1.0, max_steps_2d=500, max_steps_3d=500, etol_2d=0.0, etol_3d=1e-6,
+                z_noise=0.05, seed=None, pair_2d=PAIR_2D, pair_3d=PAIR_3D, min_style="cg",
+                skin=1.0, airebo_file="CH.airebo", n_threads=N_THREADS, lmp="lmp"):
     '''
-    Minimize the energy of a coarse-grained graphene structure using LAMMPS and ASE.
+    Relax a polycrystalline graphene sheet with LAMMPS (planar stage then 3D stage)
     Inputs:
-        atoms: atomic positions
-        generators: positions of the Voronoi generators
-        generator_boundary_mask: mask for generators that are on the boundary
-        L: box size
-        ftol: tolerance for convergence
-        max_steps: maximum number of optimization steps
-        airebo_file: path to the AIREBO potential file
+        atoms : atomic positions (N, 3)
+        L : box size
+        generators, generator_boundary_mask : used to select the atoms free in the planar stage
+        ftol : force tolerance (global force two-norm, eV/AA)
+        max_steps_2d, max_steps_3d : iteration caps of the two stages
+        etol_2d, etol_3d : relative energy tolerances of the two stages
+        z_noise : amplitude of the random z displacement before the 3D stage (AA)
+        seed : seed of the z displacement
+        pair_2d, pair_3d : pair styles of the two stages
+        min_style : LAMMPS minimiser ("cg" or "fire")
+        skin : neighbour-list skin (AA)
+        airebo_file : AIREBO parameter file
+        n_threads : OpenMP threads for LAMMPS
     Outputs:
-        relaxed atomic positions
+        relaxed atomic positions, dictionary with the minimisation statistics
     '''
-    check_lammps_installation()
-
+    check_lammps_installation(lmp)
     airebo_abs = os.path.abspath(airebo_file)
     if not os.path.isfile(airebo_abs):
         raise FileNotFoundError(f"AIREBO potential file not found at {airebo_abs}")
 
-    boundary_mask = atom_boundary_mask_from_generators(atoms, generators, generator_boundary_mask)
-    n_free = int(np.sum(boundary_mask))
+    atoms = np.asarray(atoms, dtype=np.float64)
+    if atoms.shape[1] == 2:
+        atoms = np.hstack([atoms, np.zeros((len(atoms), 1))])
 
-    if n_free == 0:
-        return atoms.copy()
-    
-    free_ids = np.where(boundary_mask)[0] + 1
+    free = atom_boundary_mask_from_generators(atoms, generators, generator_boundary_mask, L)
+    types = np.where(free, 1, 2)
+    if seed is None:
+        seed = int(np.random.default_rng().integers(1, 2**31 - 1))
+    seed = max(1, int(seed) % (2**31 - 1))
 
     with tempfile.TemporaryDirectory(prefix="lammps_relax_") as tmpdir:
         data_file = os.path.join(tmpdir, "input.data")
-        input_file_2d = os.path.join(tmpdir, "input_2d.in")
-        input_file_3d = os.path.join(tmpdir, "input_3d.in")
-        dump_file_2d = os.path.join(tmpdir, "relaxed_2d.dump")
-        dump_file_3d = os.path.join(tmpdir, "relaxed_3d.dump")
-        log_file_2d = os.path.join(tmpdir, "lammps_2d.log")
-        log_file_3d = os.path.join(tmpdir, "lammps_3d.log")
+        input_file = os.path.join(tmpdir, "relax.in")
+        dump_file = os.path.join(tmpdir, "relaxed.dump")
+        log_file = os.path.join(tmpdir, "lammps.log")
 
-        write_lammps_data_2d(atoms, L, data_file)
-        input_script_2d = write_lammps_input_2d(
-            data_file=data_file,
-            dump_file=dump_file_2d,
-            airebo_abs=airebo_abs,
-            free_indices=free_ids,
-            ftol=ftol,
-            max_steps=max_steps,
-            n_threads=n_threads
-        )
-        with open(input_file_2d, 'w') as f:
-            f.write(input_script_2d)
+        write_lammps_data(atoms, types, L, data_file)
+        with open(input_file, "w") as f:
+            f.write(write_lammps_input(data_file, dump_file, airebo_abs, ftol, max_steps_2d, max_steps_3d,
+                                       etol_2d, etol_3d, z_noise, seed, pair_2d, pair_3d, min_style, skin))
 
-        cmd = [
-            "lmp",
-            "-in", input_file_2d,
-            "-log", log_file_2d,
-            "-pk", "omp", str(n_threads),
-            "-sf", "omp",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        env = os.environ.copy()
+        env["OMP_NUM_THREADS"] = str(n_threads)
+        cmd = [lmp, "-in", input_file, "-log", log_file, "-screen", "none",
+               "-pk", "omp", str(n_threads), "-sf", "omp"]
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env)
 
-        if result.returncode != 0:
-            log_content = ""
-            if os.path.isfile(log_file_2d):
-                with open(log_file_2d) as f:
-                    log_content = f.read()
+        if result.returncode != 0 or not os.path.isfile(dump_file):
+            log_content = open(log_file).read() if os.path.isfile(log_file) else ""
             raise RuntimeError(
-                f"LAMMPS execution failed with return code {result.returncode}.\n"
-                f"Stdout: {result.stdout}\n"
-                f"Stderr: {result.stderr}\n"
-                f"Log content:\n{log_content}"
-                )
-        
-        if not os.path.isfile(dump_file_2d):
-            raise RuntimeError("LAMMPS did not produce the expected dump file.")
-        
-        pos_2d = read_lammps_dump_2d(dump_file_2d, atoms, boundary_mask, L)
-        n_iter = parse_n_iterations(log_file_2d)
-        # print(f"CG relaxation completed in {n_iter} iterations.")
+                f"LAMMPS failed (return code {result.returncode}).\n"
+                f"Stdout: {result.stdout}\nStderr: {result.stderr}\n"
+                f"Log (last 3000 chars):\n{log_content[-3000:]}"
+            )
 
-        rng = np.random.default_rng()
-        pos_2d[:, 2] += rng.uniform(-0.05, 0.05, size=len(pos_2d))
+        pos = read_lammps_dump(dump_file, len(atoms), L)
+        stats = parse_minimization_stats(log_file)
 
-        write_lammps_data_3d(pos_2d, L, data_file)
-        input_script_3d = write_lammps_input_3d(
-            data_file=data_file,
-            dump_file=dump_file_3d,
-            airebo_abs=airebo_abs,
-            free_indices=free_ids,
-            ftol=ftol,
-            max_steps=max_steps,
-            n_threads=n_threads
-        )
-        with open(input_file_3d, 'w') as f:
-            f.write(input_script_3d)
+    stats["n_free_2d"] = int(np.sum(free))
+    stats["seed"] = seed
+    return pos, stats
 
-        cmd = [
-            "lmp",
-            "-in", input_file_3d,
-            "-log", log_file_3d,
-            "-pk", "omp", str(n_threads),
-            "-sf", "omp",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
-        if result.returncode != 0:
-            log_content = ""
-            if os.path.isfile(log_file_3d):
-                with open(log_file_3d) as f:
-                    log_content = f.read()
-            raise RuntimeError(
-                f"LAMMPS execution failed with return code {result.returncode}.\n"
-                f"Stdout: {result.stdout}\n"
-                f"Stderr: {result.stderr}\n"
-                f"Log content:\n{log_content}"
-                )
-        
-        if not os.path.isfile(dump_file_3d):
-            raise RuntimeError("LAMMPS did not produce the expected dump file.")
-        
-        pos_relaxed = read_lammps_dump_3d(dump_file_3d, pos_2d, boundary_mask, L)
-        n_iter_3d = parse_n_iterations(log_file_3d)
-        # print(f"3D relaxation completed in {n_iter_3d} iterations.")
-
-        return pos_relaxed
 
 class CGRelaxation:
 
-    def relaxation_CG(
-        self,
-        atoms: np.ndarray,
-        generators: np.ndarray,
-        generator_boundary_mask: np.ndarray,
-        ftol: float = 1.0,
-        max_steps: int = 500,
-        airebo_file: str = "CH.airebo",
-        n_threads: int = N_TRHEADS
-        ) -> np.ndarray:
-        
-        return minimize_CG(
-            atoms = atoms,
-            L = self.L,
-            generators = generators,
-            generator_boundary_mask = generator_boundary_mask,
-            ftol = ftol,
-            max_steps = max_steps,
-            airebo_file = airebo_file,
-            n_threads = n_threads
-        )
+    def relaxation_CG(self, atoms, generators, generator_boundary_mask, **kwargs):
+        pos, stats = minimize_CG(atoms=atoms, L=self.L, generators=generators,
+                                 generator_boundary_mask=generator_boundary_mask, **kwargs)
+        self.lammps_info = stats
+        return pos

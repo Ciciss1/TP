@@ -1,4 +1,6 @@
 import os
+import time
+import warnings
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -8,14 +10,13 @@ from numba import njit
 from shapely.geometry import Polygon
 from shapely import contains_xy
 from scipy.spatial import Voronoi, cKDTree
-from scipy.interpolate import griddata
 
-import Observables as obs
 from Voronoi import PeriodicVoronoi
-from Lloyd import Lloyd
+from Lloyd import Lloyd, _periodic_images
 from CG_Relaxation import CGRelaxation
 
-@njit
+
+@njit(cache=True)
 def generate_triangular_lattice(L, a_CC = 1.42):
     '''
     Generate a triangular lattice with lattice constant a
@@ -39,9 +40,9 @@ def generate_triangular_lattice(L, a_CC = 1.42):
             buf[idx] = r
             idx += 1
     atoms = buf[:idx]
-    return atoms    
+    return atoms
 
-@njit
+@njit(cache=True)
 def rotate_and_move_atoms(atoms, theta, center):
     '''
     Rotate atoms in each grain by the corresponding angle in theta and move them to the center of the grain
@@ -62,7 +63,7 @@ def rotate_and_move_atoms(atoms, theta, center):
         rotated[i, 1] = s * x + c * y + center[1]
     return rotated
 
-@njit
+@njit(cache=True)
 def compute_neighbors(atoms, bonds):
     '''
     Compute the 3 nearest neighbors for each atom based on the bonds
@@ -86,24 +87,40 @@ def compute_neighbors(atoms, bonds):
                 break
     return neighbors
 
-def load_crystal(path):
-    data = np.load(path)
-    
-    L = float(data['L'][0])
-    rho = float(data['rho'][0])
 
+def voronoi_from_points(L, rho, points, theta):
+    '''
+    Rebuild a PeriodicVoronoi from saved grain centres and orientations (no random draw)
+    '''
     vor = PeriodicVoronoi.__new__(PeriodicVoronoi)
     vor.L = L
     vor.rho = rho
-    vor.points = data['points']
-    vor.theta = data['theta']
+    vor.points = np.asarray(points, dtype=np.float64)
+    vor.theta = np.asarray(theta, dtype=np.float64).copy()
     vor.N = len(vor.points)
     vor.build_periodic_voronoi()
     vor.get_adjacency()
+    return vor
+
+
+def periodic_bond_lengths(atoms, bonds, L):
+    d = atoms[bonds[:, 0], :2] - atoms[bonds[:, 1], :2]
+    d -= L * np.round(d / L)
+    return np.linalg.norm(d, axis=1)
+
+
+def load_crystal(path):
+    data = np.load(path)
+
+    L = float(data['L'][0])
+    rho = float(data['rho'][0])
+
+    vor = voronoi_from_points(L, rho, data['points'], data['theta'])
 
     crystal = GrapheneCrystal.__new__(GrapheneCrystal)
     crystal.lattice = vor
     crystal.vor = vor.vor
+    crystal.all_points = vor.all_points
     crystal.L = L
     crystal.N = vor.N
     crystal.points = vor.points
@@ -111,11 +128,16 @@ def load_crystal(path):
 
     crystal.relaxed_generators = data['relaxed_generators']
     crystal.boundary_mask = crystal.get_boundary_mask(crystal.relaxed_generators)
-    _ , crystal.bonds = crystal.vertices_from_generators(crystal.relaxed_generators)
     crystal.atoms = data['atoms']
+    if 'bonds' in data.files:
+        crystal.bonds = data['bonds']
+    else:
+        # Old files: rebuild the bonds with the original atom ordering
+        _, crystal.bonds = crystal.vertices_from_generators(crystal.relaxed_generators, legacy=True)
     crystal.neighbors = compute_neighbors(crystal.atoms, crystal.bonds)
 
     return crystal
+
 
 class GrapheneCrystal(Lloyd, CGRelaxation):
     '''
@@ -129,20 +151,25 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         atoms : coordinates of the atoms
         bonds : list of bonds between atoms
         neighbors : list of nearest neighbors for each atom
+        timings, lloyd_info, lammps_info, checks : diagnostics of the construction
     '''
-    def __init__(self, voronoi: PeriodicVoronoi, a = 1.42):
+    def __init__(self, voronoi: PeriodicVoronoi, a = 1.42, margin = 5, lloyd_kwargs = None, lammps_kwargs = None):
         self.lattice = voronoi
         self.vor = voronoi.vor
         self.L = voronoi.L
         self.N = voronoi.N
         self.points = voronoi.points
         self.all_points = voronoi.all_points
-        self.theta = voronoi.theta
-        self.build_polycrystal(a, margin = 5)
+        self.theta = voronoi.theta.copy()
+        self.build_polycrystal(a, margin = margin, lloyd_kwargs = lloyd_kwargs or {}, lammps_kwargs = lammps_kwargs or {})
 
     def remove_close_generators(self, generators, min_dist = 0.5):
-        tree = cKDTree(generators)
-        close_pairs = tree.query_pairs(min_dist)
+        '''
+        Remove generators closer than min_dist to another one, taking the periodicity into account
+        (generators must be in [0, L))
+        '''
+        tree = cKDTree(generators, boxsize=self.L)
+        close_pairs = tree.query_pairs(min_dist, output_type='ndarray')
         to_remove = set()
         for i, j in close_pairs:
             if i not in to_remove and j not in to_remove:
@@ -153,105 +180,110 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
 
         return generators[mask]
 
-    def get_boundary_mask(self, generators, margin = 10):
+    def get_boundary_mask(self, generators, margin = 10, k = 16):
         '''
-        Identify generators that are close to the grains boundaries
+        Identify generators that are close to the grains boundaries.
+        The distance of a point to the boundary of its (convex) Voronoi cell is the minimum over the
+        neighbouring grain centres c_k of the distance to the bisector with c_k:
+            (d_k^2 - d_1^2) / (2 |c_k - c_1|)
         Inputs:
             generators : coordinates of the generators
             margin : distance from the boundary
+            k : number of nearest grain centres considered
         Outputs:
             boundary_mask : boolean mask
         '''
-        L = self.L
-
-        vertices = np.array(self.vor.ridge_vertices)
-        valid = (vertices[:, 0] != -1) & (vertices[:, 1] != -1)
-        vertices = vertices[valid]
-
-        v1 = self.vor.vertices[vertices[:, 0]]
-        v2 = self.vor.vertices[vertices[:, 1]]
-
-        self.boundary_mask = np.zeros(len(generators), dtype=bool)
-
-        for i in range(len(v1)):
-            edge_vec = v2[i] - v1[i]
-            edge_length = np.linalg.norm(edge_vec)
-            if edge_length < 1e-8:
-                continue
-            edge_dir = edge_vec / edge_length
-
-            to_v1 = generators - v1[i]
-            proj_length = np.dot(to_v1, edge_dir)
-            proj_length = np.clip(proj_length, 0, edge_length)
-            closest_point = v1[i] + np.outer(proj_length, edge_dir)
-            dist_to_edge = np.linalg.norm(generators - closest_point, axis=1)
-
-            self.boundary_mask |= (dist_to_edge < margin)
-
+        centres = self.all_points
+        k = min(k, len(centres))
+        tree = cKDTree(centres)
+        d, idx = tree.query(np.mod(generators, self.L), k=k)
+        c = centres[idx]
+        sep = np.linalg.norm(c[:, 1:] - c[:, :1], axis=2)
+        dist = (d[:, 1:]**2 - d[:, :1]**2) / (2 * np.maximum(sep, 1e-12))
+        self.boundary_mask = dist.min(axis=1) < margin
         return self.boundary_mask
 
-    def vertices_from_generators(self, generators):
+    def vertices_from_generators(self, generators, legacy = False, tol = 1e-4, pad = 10.0):
         '''
         Compute the vertices of the Voronoi diagram from the generators
         Inputs:
             generators : coordinates of the generators
+            legacy : reproduce the atom ordering of the old implementation (for old files without bonds)
+            tol : merging tolerance of periodic copies of a vertex
+            pad : width of the periodic images (non-legacy mode)
         Outputs:
             atoms : coordinates of the atoms in the graphene lattice
             bonds : list of bonds between atoms
         '''
         L = self.L
-        images = [generators + np.array([dx, dy]) 
-                    for dx in [-L, 0, L]
-                    for dy in [-L, 0, L]]
-        all_gen = np.vstack(images)
         M = len(generators)
+
+        if legacy:
+            images = [generators + np.array([dx, dy]) for dx in [-L, 0, L] for dy in [-L, 0, L]]
+            all_gen = np.vstack(images)
+            c0, c1 = 4 * M, 5 * M
+        else:
+            all_gen = _periodic_images(np.mod(generators, L), L, pad)
+            c0, c1 = 0, M
         vor = Voronoi(all_gen)
 
-        central_cells = set(range(4 * M, 5 * M))
-        tol = 1e-4
+        rp = vor.ridge_points
+        rv = np.asarray(vor.ridge_vertices)
+        central = ((rp >= c0) & (rp < c1)).any(axis=1)
+        finite = (rv >= 0).all(axis=1)
+        seq = rv[central & finite].ravel()          # vertices in order of first encounter
 
-        v2atom = {}
-        atom_list = []
-        pos_to_atom = {}
+        wpos = np.mod(vor.vertices[seq], L)
+        nL = int(round(L / tol))
+        keys = np.round(wpos / tol).astype(np.int64)
+        if not legacy:
+            keys %= nL                              # vertices at x = 0 and x = L are the same atom
+        kid = keys[:, 0] * (nL + 2) + keys[:, 1]
 
-        def get_atom(raw_idx):
-            if raw_idx in v2atom:
-                return v2atom[raw_idx]
-            wpos = vor.vertices[raw_idx] % L
-            key = (int(round(wpos[0] / tol)), int(round(wpos[1] / tol)))
-            if key not in pos_to_atom:
-                pos_to_atom[key] = len(atom_list)
-                atom_list.append(wpos)
-            v2atom[raw_idx] = pos_to_atom[key]
-            return v2atom[raw_idx]
+        _, first, inv = np.unique(kid, return_index=True, return_inverse=True)
+        order = np.argsort(first)
+        rank = np.empty_like(order)
+        rank[order] = np.arange(len(order))
+        atom_of = rank[inv.ravel()]
+        atoms = wpos[first[order]]
 
-        bonds = set()
-        for k in range(len(vor.ridge_points)):
-            pi, pj = vor.ridge_points[k]
-            vi, vj = vor.ridge_vertices[k]
-            if vi == -1 or vj == -1:
-                continue
-            if pi not in central_cells and pj not in central_cells:
-                continue
-            
-            i, j = get_atom(vi), get_atom(vj)
-            if i != j:
-                bonds.add((min(i, j), max(i, j)))
-
-        atoms = np.array(atom_list)
-        bonds = np.array(sorted(bonds), dtype=np.int64)
+        pairs = atom_of.reshape(-1, 2)
+        pairs = pairs[pairs[:, 0] != pairs[:, 1]]
+        pairs.sort(axis=1)
+        bonds = np.unique(pairs, axis=0).astype(np.int64)
 
         return atoms, bonds
 
-    def build_polycrystal(self, a_CC = 1.42, margin = 10):
+    def check_topology(self, n_generators):
+        '''
+        Sanity checks: a generic Voronoi diagram on a torus has exactly 2 vertices per generator
+        and every vertex has exactly 3 neighbours
+        '''
+        deg = np.bincount(self.bonds.ravel(), minlength=len(self.atoms))
+        r = periodic_bond_lengths(self.atoms, self.bonds, self.L)
+        self.checks = {
+            "n_generators": int(n_generators),
+            "n_atoms": int(len(self.atoms)),
+            "atoms_equal_2_generators": bool(len(self.atoms) == 2 * n_generators),
+            "all_degree_3": bool(np.all(deg == 3)),
+            "bond_min": float(r.min()),
+            "bond_max": float(r.max()),
+        }
+        if not (self.checks["atoms_equal_2_generators"] and self.checks["all_degree_3"]):
+            warnings.warn(f"Topology check failed: {self.checks}")
+        return self.checks
+
+    def build_polycrystal(self, a_CC = 1.42, margin = 10, lloyd_kwargs = None, lammps_kwargs = None):
         '''
         Build the polycrystalline graphene structure
         Inputs:
             a_CC : carbon-carbon bond length
             margin : distance from the grain boundaries
-            n_iter : maximum number of iterations for relaxation
-            tol : tolerance for convergence of relaxation
+            lloyd_kwargs : options of the Lloyd relaxation
+            lammps_kwargs : options of the LAMMPS relaxation
         '''
+        self.timings = {}
+        t0 = time.perf_counter()
 
         # Generate base Lattice
         mean_grain_radius = 1 / np.sqrt(np.pi * self.lattice.rho)
@@ -278,10 +310,10 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
                 src = generate_triangular_lattice(diag + 4 * a_CC, a_CC)
             else:
                 src = base_lattice
-            
+
             theta = self.theta[grain % self.N]
             center = self.all_points[grain]
-            
+
             rot_atoms = rotate_and_move_atoms(src, theta, center)
 
             mask = (rot_atoms[:, 0] >= min_x) & (rot_atoms[:, 0] <= max_x) & (rot_atoms[:, 1] >= min_y) & (rot_atoms[:, 1] <= max_y)
@@ -293,29 +325,37 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
 
         generators = np.vstack(all_generators)
 
-        # Keep only generators that are within the box
+        # Keep only generators that are within the box, wrapped into [0, L)
         mask = (generators[:, 0] >= 0) & (generators[:, 0] <= self.L) & (generators[:, 1] >= 0) & (generators[:, 1] <= self.L)
+        generators = np.mod(generators[mask], self.L)
 
-        generators = generators[mask]
-
+        # Periodic removal: also removes the duplicates across the box edges
         generators = self.remove_close_generators(generators)
 
         self.boundary_mask = self.get_boundary_mask(generators, margin)
+        self.timings["generators"] = time.perf_counter() - t0
 
         # Relax the generators using Lloyd's algorithm
-        self.relaxed_generators = self.relaxation(generators, self.boundary_mask)
+        t0 = time.perf_counter()
+        self.relaxed_generators = self.relaxation(generators, self.boundary_mask, **(lloyd_kwargs or {}))
+        self.timings["lloyd"] = time.perf_counter() - t0
 
         # Construct the atoms and bonds from the relaxed generators
+        t0 = time.perf_counter()
         self.atoms, self.bonds = self.vertices_from_generators(self.relaxed_generators)
-
+        self.check_topology(len(self.relaxed_generators))
         self.atoms = np.hstack([self.atoms, np.zeros((len(self.atoms), 1))])
+        self.timings["vertices"] = time.perf_counter() - t0
 
         # Relax the atoms using LAMMPS
+        t0 = time.perf_counter()
         self.atoms = self.relaxation_CG(
             atoms=self.atoms,
             generators=self.relaxed_generators,
             generator_boundary_mask=self.boundary_mask,
+            **(lammps_kwargs or {}),
         )
+        self.timings["lammps"] = time.perf_counter() - t0
 
         # Compute the neighbors for each atom
         self.neighbors = compute_neighbors(self.atoms, self.bonds)
@@ -353,9 +393,6 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
     def plot_all(self, fig_size = 6, dot_size = 1, lw = 0.5, atom_phase = None):
         fig, ax = plt.subplots(figsize=(fig_size*1.25, fig_size))
 
-        # lines = [(self.atoms[i, :2], self.atoms[j, :2]) for i, j in self.bonds if np.linalg.norm(self.atoms[i, :2] - self.atoms[j, :2]) < 4]
-        # lc = LineCollection(lines, colors='black', linewidths=lw)
-        # ax.add_collection(lc)        
         if atom_phase is not None:
             phase_norm = (atom_phase + np.pi) / (2 * np.pi)
 
@@ -377,9 +414,24 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
     def plot_lattice(self):
         self.lattice.plot()
 
-    def save_crystal(self, path):
-        if not os.path.exists(os.path.dirname(path)):
-            os.makedirs(os.path.dirname(path))
+    def save_crystal(self, path, **extra):
+        '''
+        Save the crystal. Diagnostics (timings, Lloyd, LAMMPS, topology checks) are stored with
+        the prefixes timing_, lloyd_, lammps_, check_; extra keyword arguments are stored as meta_<key>.
+        '''
+        folder = os.path.dirname(path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+
+        diag = {}
+        for prefix, d in (("timing_", getattr(self, "timings", {})),
+                          ("lloyd_", getattr(self, "lloyd_info", {})),
+                          ("lammps_", getattr(self, "lammps_info", {})),
+                          ("check_", getattr(self, "checks", {})),
+                          ("meta_", extra)):
+            for key, value in d.items():
+                diag[prefix + key] = np.asarray(value)
+
         np.savez_compressed(
             path,
             points = self.points,
@@ -388,23 +440,20 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
             rho = np.array([self.lattice.rho]),
             relaxed_generators = self.relaxed_generators,
             atoms = self.atoms,
+            bonds = self.bonds,
+            **diag,
         )
 
 
 # Test
 
 if __name__ == "__main__":
-    import time
+    import Observables as obs
 
     _ = generate_triangular_lattice(10.0)
 
     configs = [
         (200,  0.0007,  "10 grains / 200Å  — test de base"),
-        # (200,  0.0003,  "12 grains / 200Å  — test de base"),
-        # (500,  0.0007,  "75 grains / 500Å  — polycristal moyen"),
-        # (500,  0.001,   "250 grains / 500Å — grains plus petits"),
-        # (1000, 0.0003,  "300 grains / 1000Å — grande boîte"),
-        # (1000, 0.001,   "1000 grains / 1000Å — haute densité"),
     ]
 
     for L, rho, desc in configs:
@@ -415,16 +464,10 @@ if __name__ == "__main__":
         t0 = time.time()
 
         vor = PeriodicVoronoi(L, rho)
-
         crystal = GrapheneCrystal(vor)
 
-        angles = []
-        for i, atom in enumerate(crystal.atoms):
-            psi_6_i = obs.compute_psi6(i, crystal.atoms, crystal.neighbors, crystal.L)
-            angle = np.angle(psi_6_i)
-            angles.append(angle)
-
-        angles = np.array(angles)
+        angles = np.array([np.angle(obs.compute_psi6(i, crystal.atoms, crystal.neighbors, crystal.L))
+                           for i in range(len(crystal.atoms))])
 
         crystal.plot_all(atom_phase=angles)
         plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_all.png", dpi=300)
@@ -434,11 +477,11 @@ if __name__ == "__main__":
         plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_bonds.png", dpi=300)
         plt.close()
 
-
         t1 = time.time()
         print(f"  Grains   : {vor.N}")
         print(f"  Atomes   : {len(crystal.atoms):,} Shape: {crystal.atoms.shape}")
-        print(f"  Temps    : {t1 - t0:.2f} s")
+        print(f"  Temps    : {t1 - t0:.2f} s   {crystal.timings}")
+        print(f"  Checks   : {crystal.checks}")
+        print(f"  LAMMPS   : {crystal.lammps_info}")
 
-        save_path = f"results/test_{L:.0f}_{rho:.0e}.npz"
-        crystal.save_crystal(save_path)
+        crystal.save_crystal(f"results/test_{L:.0f}_{rho:.0e}.npz")

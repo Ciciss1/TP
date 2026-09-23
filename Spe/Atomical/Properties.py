@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 from numba import njit, prange
 from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter
@@ -1381,3 +1382,395 @@ def plot_triple_junction_map(junction_xy, free_xy, Lx, Ly, radius=None,
         plt.savefig(save_path, dpi=150)
         print(f"Figure sauvegardee: {save_path}")
     return fig
+
+# ---------------------------------------------------------------------
+# 17) Tight-binding pz LDOS pres du point de Dirac (analogue STM/STS)
+# ---------------------------------------------------------------------
+#
+# Objectif : distinguer GB "ordonne" (paire de pics symetriques a basse
+# energie) vs GB "amorphe" (pic a energie nulle), Mesaros et al. PRB 82,
+# 205119 (2010). Reutilise directement nb_sorted/deg (deja calcules pour
+# les anneaux/la deformation locale) -- pas de nouvelle recherche de
+# voisins.
+#
+# A ~10^5 atomes, la diagonalisation exacte (meme en shift-invert autour
+# de E=0) est hors de portee : l'espacement des niveaux pres du point de
+# Dirac est ~bande passante/N, donc resoudre une fenetre de ~0.1-0.2 eV
+# demande des MILLIERS d'etats propres, et le cout d'eigsh croit bien
+# plus vite que lineairement avec k (verifie empiriquement : k=300 sur
+# un fichier de 117k atomes -> ~90s, et la resolution obtenue est encore
+# trop grossiere). La methode utilisee ici a la place est la Kernel
+# Polynomial Method (KPM, Weisse et al. Rev. Mod. Phys. 78, 275 (2006)) :
+# developpement de Chebyshev de la LDOS via uniquement des produits
+# matrice-vecteur creux (jamais de diagonalisation), en ne calculant la
+# LDOS qu'aux atomes "sondes" (GB + bulk echantillonnes) plutot qu'a
+# tous les atomes -- suffisant puisqu'on compare des spectres MOYENS
+# GB vs bulk, pas une carte complete.
+
+def build_tb_hamiltonian(xyz, nb_sorted, deg, Lx, Ly, t0=2.7, a0=1.42, beta=2.0):
+    """
+    Hamiltonien tight-binding pz (1 orbitale/atome, premiers voisins),
+    construit a partir du graphe de voisinage DEJA calcule par
+    build_neighbor_array (meme graphe que celui utilise pour anneaux/
+    is_defect/local_strain_field -- pas de nouvelle recherche cKDTree).
+
+    Hopping module par la longueur de liaison REELLE en 3D (xyz, donc
+    avec le flambage hors-plan pres des defauts inclus) :
+        t(d) = -t0 * (a0/d)^beta
+    Choix de modelisation (pas derive de l'AIREBO) -- la loi exponentielle
+    t(d) = -t0*exp(-beta_exp*(d/a0 - 1)) (beta_exp ~ 3.14, cf. litterature
+    contrainte/pseudo-champ-magnetique, Pereira et al.) est une alternative
+    courante, a comparer si les resultats sont sensibles a la forme choisie.
+
+    Inputs:
+        xyz : (N,3) positions (z = flambage hors-plan)
+        nb_sorted, deg : sortie de build_neighbor_array (memes xy, Lx, Ly)
+        Lx, Ly : taille de boite (periodique en x,y seulement -- pas de PBC en z)
+    Outputs:
+        H     : (N,N) csr, symetrique, H_ij = t(d_ij) pour chaque liaison
+        pairs : (n_bonds, 3) = [i, j, d_ij] -- a inspecter pour verifier
+                que la distribution de d_ij ne deborde pas vers les
+                secondes voisines (~2.46 A en graphene pristine)
+    """
+    N = xyz.shape[0]
+    xy = xyz[:, :2]
+    max_deg = nb_sorted.shape[1]
+
+    ii = np.repeat(np.arange(N), max_deg)
+    jj = nb_sorted.ravel()
+    valid = jj >= 0
+    ii, jj = ii[valid], jj[valid]
+    keep = ii < jj                      # chaque liaison une seule fois
+    ii, jj = ii[keep], jj[keep]
+
+    dx = xy[ii, 0] - xy[jj, 0]
+    dy = xy[ii, 1] - xy[jj, 1]
+    dx -= Lx * np.round(dx / Lx)
+    dy -= Ly * np.round(dy / Ly)
+    dz = xyz[ii, 2] - xyz[jj, 2]        # pas de PBC en z (feuillet, pas un volume)
+    d = np.sqrt(dx * dx + dy * dy + dz * dz)
+
+    t = -t0 * (a0 / d) ** beta
+
+    row = np.concatenate([ii, jj])
+    col = np.concatenate([jj, ii])
+    val = np.concatenate([t, t])
+    H = coo_matrix((val, (row, col)), shape=(N, N)).tocsr()
+    pairs = np.column_stack([ii, jj, d])
+    return H, pairs
+
+
+def estimate_spectral_bounds(H, pad=0.05):
+    """
+    Borne de Gershgorin (rayon spectral <= max_i sum_j |H_ij|, diagonale
+    nulle ici) -- volontairement conservatrice pour eviter tout
+    depassement de [-1,1] apres rescaling (ce qui ferait diverger la
+    recursion de Chebyshev), au prix d'une resolution KPM legerement
+    reduite par rapport a une borne serree (Lanczos a quelques pas).
+    Retourne (a, b) tels que H_tilde = (H - b*I) / a ait un spectre
+    dans [-1+pad, 1-pad].
+    """
+    row_abs_sum = np.abs(H).sum(axis=1)
+    row_abs_sum = np.asarray(row_abs_sum).ravel()
+    lam_max = row_abs_sum.max()
+    lam_min = -lam_max                  # H est bipartite (sous-reseaux A/B), spectre symetrique
+    a = (lam_max - lam_min) / 2.0 / (1.0 - pad)
+    b = (lam_max + lam_min) / 2.0
+    return float(a), float(b)
+
+
+def jackson_kernel(n_moments):
+    """ Noyau de Jackson (attenue les oscillations de Gibbs du tronquage). """
+    n = np.arange(n_moments)
+    M = n_moments
+    g = ((M - n + 1) * np.cos(np.pi * n / (M + 1))
+         + np.sin(np.pi * n / (M + 1)) / np.tan(np.pi / (M + 1))) / (M + 1)
+    return g
+
+
+def kpm_moments(H, probe_idx, n_moments=1024, a=None, b=None, pad=0.05, verbose=False):
+    """
+    Moments de Chebyshev mu_n(i) = <i| T_n(H_tilde) |i> pour chaque atome
+    i dans probe_idx, calcules simultanement pour tous les atomes sondes
+    (les vecteurs de depart e_i sont empiles en colonnes -- un seul jeu
+    de produits matrice-dense suffit pour tous les atomes sondes a la fois).
+    Cout : ~n_moments produits matrice(NxN, creuse)-matrice(N x n_probes,
+    dense), soit O(n_moments * nnz(H) * n_probes) -- lineaire en
+    n_moments et en n_probes, INDEPENDANT du cout (bien pire, super-
+    lineaire) d'une diagonalisation.
+
+    Inputs:
+        H : sortie de build_tb_hamiltonian
+        probe_idx : (n_probes,) indices des atomes dont on veut la LDOS
+        n_moments : ordre du developpement -- fixe la resolution en energie
+                    (~ pi*a/n_moments apres rescaling, cf. Weisse et al. 2006)
+    Outputs:
+        mu : (n_probes, n_moments)
+        a, b : bornes utilisees pour le rescaling (a reutiliser pour la
+               reconstruction -- kpm_reconstruct_ldos)
+    """
+    if a is None or b is None:
+        a, b = estimate_spectral_bounds(H, pad=pad)
+
+    N = H.shape[0]
+    n_probes = len(probe_idx)
+    Htilde = (H - b * coo_matrix((np.ones(N), (np.arange(N), np.arange(N))),
+                                  shape=(N, N)).tocsr()) / a
+
+    T_prev = np.zeros((N, n_probes))
+    T_prev[probe_idx, np.arange(n_probes)] = 1.0     # |T_0> = |i>
+    T_curr = Htilde @ T_prev                          # |T_1> = Htilde|i>
+
+    mu = np.empty((n_probes, n_moments))
+    mu[:, 0] = T_prev[probe_idx, np.arange(n_probes)]
+    mu[:, 1] = T_curr[probe_idx, np.arange(n_probes)]
+
+    for n in range(2, n_moments):
+        T_next = 2.0 * (Htilde @ T_curr) - T_prev
+        mu[:, n] = T_next[probe_idx, np.arange(n_probes)]
+        T_prev, T_curr = T_curr, T_next
+        if verbose and n % 200 == 0:
+            print(f"  KPM moment {n}/{n_moments}")
+
+    return mu, a, b
+
+
+def kpm_reconstruct_ldos(mu, a, b, e_grid, n_moments=None):
+    """
+    Reconstruit LDOS(atome, E) sur e_grid a partir des moments de
+    Chebyshev (noyau de Jackson applique pour limiter les oscillations
+    de troncature) :
+        rho(E) = 1/(a*pi*sqrt(1-x^2)) * [g0*mu0 + 2*sum_{n>=1} gn*mu_n*T_n(x)]
+        x = (E - b) / a
+    Inputs:
+        mu : (n_probes, n_moments), sortie de kpm_moments
+        a, b : memes bornes que kpm_moments
+        e_grid : (n_e,) energies (eV) ou evaluer la LDOS
+    Output:
+        ldos : (n_probes, n_e)
+    """
+    if n_moments is None:
+        n_moments = mu.shape[1]
+    g = jackson_kernel(n_moments)
+
+    x = (e_grid - b) / a
+    x_clip = np.clip(x, -1 + 1e-10, 1 - 1e-10)
+    theta = np.arccos(x_clip)                          # (n_e,)
+    n = np.arange(n_moments)[:, None]                  # (n_moments,1)
+    Tn = np.cos(n * theta[None, :])                     # (n_moments, n_e)
+
+    weighted_mu = (g[:, None] * mu.T)                   # (n_moments, n_probes)
+    weighted_mu[0, :] *= 0.5                             # le terme n=0 compte une fois, pas deux
+    coeffs = 2.0 * weighted_mu                           # (n_moments, n_probes)
+
+    ldos = (coeffs.T @ Tn) / (a * np.pi * np.sin(theta)[None, :])   # (n_probes, n_e)
+    return ldos
+
+
+def kpm_window_weight(mu, a, b, e_window=0.15, n_e=800, n_moments=None):
+    """
+    Poids LDOS integre dans [-e_window, e_window], par atome sonde --
+    equivalent KPM de zero_energy_peak_metric. Reconstruit sur une
+    grille locale fine puis integre par trapezes (plus simple a
+    verifier que l'integrale analytique des T_n, largement suffisant
+    en precision pour une fenetre aussi etroite).
+    """
+    e_grid = np.linspace(-e_window, e_window, n_e)
+    ldos = kpm_reconstruct_ldos(mu, a, b, e_grid, n_moments=n_moments)
+    trapz = getattr(np, "trapezoid", None) or np.trapz   # numpy>=2.0 renamed trapz -> trapezoid
+    return trapz(ldos, e_grid, axis=1)                   # (n_probes,)
+
+
+def kpm_moments_torch(H, probe_idx, n_moments=1024, a=None, b=None, pad=0.05,
+                       device=None, dtype=None, verbose=False):
+    """
+    Meme algorithme/meme resultat que kpm_moments, mais les produits
+    matrice creuse x matrice dense tournent sur GPU via PyTorch (cuSPARSE) --
+    utile pour balayer beaucoup de fichiers (T,k) a la suite plutot que
+    d'attendre le chemin CPU/scipy (~100s/fichier a 128 sondes/classe et
+    512 moments, mesure sur un fichier ~117k atomes -- voir kpm_moments).
+    Interface de sortie identique (mu en numpy) : kpm_reconstruct_ldos /
+    kpm_window_weight s'utilisent sans modification derriere.
+
+    NOTE : chemin non teste dans cet environnement (pas de GPU/torch ici) --
+    l'algorithme est le meme que la version numpy validee sur tes fichiers,
+    mais verifie le premier resultat contre kpm_moments (backend='numpy')
+    sur un petit cas avant de t'y fier pour une campagne complete.
+
+    Deux details de perf qui comptent ici (contrairement a la version numpy,
+    ou ils ne changent rien) :
+      - format CSR (pas COO) pour le sparse-dense matmul -- torch.sparse.mm
+        est nettement plus rapide en CSR sur GPU ;
+      - AUCUN .cpu() dans la boucle -- chaque appel .cpu() est un point de
+        synchronisation qui vide le pipeline GPU, et on en ferait un par
+        moment (donc n_moments fois). On accumule mu entierement sur le
+        device et on ne rapatrie qu'UNE fois a la fin.
+    """
+    import torch
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    if dtype is None:
+        # float32 sur GPU : largement suffisant (le noyau de Jackson etouffe
+        # de toute facon les hautes frequences/le bruit numerique des derniers
+        # moments) et nettement plus rapide/leger en memoire sur une RTX 3060
+        # que float64. En CPU on garde float64 (pas de gain a passer en 32 bits).
+        dtype = torch.float64 if device == "cpu" else torch.float32
+
+    if a is None or b is None:
+        a, b = estimate_spectral_bounds(H, pad=pad)
+
+    N = H.shape[0]
+    n_probes = len(probe_idx)
+
+    H_scaled_scipy = (H / a).tocsr()                     # H_scaled = H/a, format CSR
+    crow = torch.tensor(H_scaled_scipy.indptr, dtype=torch.int64, device=device)
+    col = torch.tensor(H_scaled_scipy.indices, dtype=torch.int64, device=device)
+    val = torch.tensor(H_scaled_scipy.data, dtype=dtype, device=device)
+    # Les deux UserWarning que torch souleve ici (API CSR sparse encore en beta,
+    # checks d'invariants desactives par defaut) sont connues et sans consequence
+    # pour cet usage (matrice construite une fois depuis un scipy CSR deja valide,
+    # donc deja garantie coherente) -- supprimees pour ne pas polluer les logs
+    # d'un balayage sur ~100 fichiers. N'affecte aucun autre warning.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Sparse invariant checks")
+        warnings.filterwarnings("ignore", message="Sparse CSR tensor support")
+        H_scaled = torch.sparse_csr_tensor(crow, col, val, size=(N, N))
+    b_over_a = float(b) / float(a)
+
+    probe_t = torch.tensor(probe_idx, dtype=torch.long, device=device)
+    col_t = torch.arange(n_probes, device=device)
+
+    T_prev = torch.zeros((N, n_probes), dtype=dtype, device=device)
+    T_prev[probe_t, col_t] = 1.0
+    T_curr = torch.sparse.mm(H_scaled, T_prev) - b_over_a * T_prev
+
+    mu_dev = torch.empty((n_probes, n_moments), dtype=dtype, device=device)
+    mu_dev[:, 0] = T_prev[probe_t, col_t]
+    mu_dev[:, 1] = T_curr[probe_t, col_t]
+
+    for n in range(2, n_moments):
+        T_next = 2.0 * (torch.sparse.mm(H_scaled, T_curr) - b_over_a * T_curr) - T_prev
+        mu_dev[:, n] = T_next[probe_t, col_t]
+        T_prev, T_curr = T_curr, T_next
+        if verbose and n % 200 == 0:
+            print(f"  KPM moment {n}/{n_moments} (torch/{device})")
+
+    mu = mu_dev.to(torch.float64).cpu().numpy()           # UN SEUL transfert, a la fin
+    return mu, a, b
+
+
+def ldos_gb_vs_bulk(xyz, nb_sorted, deg, Lx, Ly, is_defect,
+                     n_probes_per_class=256, n_moments=1024,
+                     e_grid=None, e_window=0.15, t0=2.7, a0=1.42, beta=2.0,
+                     seed=None, backend="numpy", verbose=False):
+    """
+    Fonction "tout-en-un" pour un fichier T_*_k_*.npz : construit H,
+    echantillonne des atomes GB (is_defect) et bulk (~is_defect),
+    calcule leurs moments KPM en un seul passage (memes produits
+    matrice-vecteur pour les deux classes -- le cout ne depend que du
+    nombre TOTAL d'atomes sondes, pas de la repartition GB/bulk), puis
+    retourne spectres moyens + poids a energie nulle par classe.
+
+    Output: dict avec
+        e_grid, gb_spectrum, bulk_spectrum (moyennes sur les atomes sondes),
+        gb_zero_E_weight, bulk_zero_E_weight (moyenne +/- std sur les
+        atomes sondes de chaque classe),
+        a, b (bornes spectrales utilisees), pairs (pour QC des longueurs
+        de liaison, cf. build_tb_hamiltonian)
+    """
+    if e_grid is None:
+        e_grid = np.linspace(-1.0, 1.0, 400)
+
+    rng = np.random.default_rng(seed)
+    gb_pool = np.where(is_defect)[0]
+    bulk_pool = np.where(~is_defect)[0]
+    n_gb = min(n_probes_per_class, len(gb_pool))
+    n_bulk = min(n_probes_per_class, len(bulk_pool))
+    gb_idx = rng.choice(gb_pool, size=n_gb, replace=False)
+    bulk_idx = rng.choice(bulk_pool, size=n_bulk, replace=False)
+    probe_idx = np.concatenate([gb_idx, bulk_idx])
+
+    H, pairs = build_tb_hamiltonian(xyz, nb_sorted, deg, Lx, Ly, t0=t0, a0=a0, beta=beta)
+    a, b = estimate_spectral_bounds(H)
+    if backend == "torch":
+        mu, a, b = kpm_moments_torch(H, probe_idx, n_moments=n_moments, a=a, b=b, verbose=verbose)
+    else:
+        mu, a, b = kpm_moments(H, probe_idx, n_moments=n_moments, a=a, b=b, verbose=verbose)
+
+    mu_gb, mu_bulk = mu[:n_gb], mu[n_gb:]
+    ldos_gb = kpm_reconstruct_ldos(mu_gb, a, b, e_grid)
+    ldos_bulk = kpm_reconstruct_ldos(mu_bulk, a, b, e_grid)
+
+    w_gb = kpm_window_weight(mu_gb, a, b, e_window=e_window)
+    w_bulk = kpm_window_weight(mu_bulk, a, b, e_window=e_window)
+
+    return {
+        "e_grid": e_grid,
+        "gb_spectrum": ldos_gb.mean(axis=0), "gb_spectrum_std": ldos_gb.std(axis=0),
+        "bulk_spectrum": ldos_bulk.mean(axis=0), "bulk_spectrum_std": ldos_bulk.std(axis=0),
+        "gb_zero_E_weight": float(w_gb.mean()), "gb_zero_E_weight_std": float(w_gb.std()),
+        "bulk_zero_E_weight": float(w_bulk.mean()), "bulk_zero_E_weight_std": float(w_bulk.std()),
+        "a": a, "b": b, "pairs": pairs,
+    }
+
+def ldos_paired_vs_free(xyz, nb_sorted, deg, Lx, Ly, ring_sizes, ring_atoms,
+                         n_probes_per_class=128, n_moments=1024,
+                         e_grid=None, e_window=0.15, t0=2.7, a0=1.42, beta=2.0,
+                         seed=None, backend="numpy", verbose=False):
+    """
+    Meme mecanique KPM que ldos_gb_vs_bulk, mais la separation en deux
+    classes d'atomes sondes est topologique plutot que geometrique :
+    dislocation liee (paire 5-7 adjacente, is_paired) vs disclinaison
+    libre (is_free) -- exactement la distinction que la transition
+    KTHNY est censee controler (liee -> attendu hexatique/ordonne,
+    libre -> attendu liquide/desordonne), au lieu du simple "est-ce un
+    defaut" (GB vs bulk) qui mélange les deux regimes a tout T.
+    Reutilise classify_dislocations / defect_type_atom_masks (deja
+    dans ce fichier, section anneaux) -- pas de nouveau calcul geometrique.
+
+    Retourne None si l'une des deux classes est vide sur ce fichier
+    (peut arriver a T tres bas : quasiment pas de disclinaisons libres
+    attendu en regime hexatique) -- a filtrer cote appelant.
+    """
+    N = xyz.shape[0]
+    is_paired = classify_dislocations(ring_sizes, ring_atoms)
+    is_paired_atom, is_free_atom = defect_type_atom_masks(N, ring_sizes, ring_atoms, is_paired)
+
+    if e_grid is None:
+        e_grid = np.linspace(-1.0, 1.0, 400)
+
+    rng = np.random.default_rng(seed)
+    paired_pool = np.where(is_paired_atom)[0]
+    free_pool = np.where(is_free_atom)[0]
+    if len(paired_pool) == 0 or len(free_pool) == 0:
+        return None
+
+    n_paired = min(n_probes_per_class, len(paired_pool))
+    n_free = min(n_probes_per_class, len(free_pool))
+    paired_idx = rng.choice(paired_pool, size=n_paired, replace=False)
+    free_idx = rng.choice(free_pool, size=n_free, replace=False)
+    probe_idx = np.concatenate([paired_idx, free_idx])
+
+    H, pairs = build_tb_hamiltonian(xyz, nb_sorted, deg, Lx, Ly, t0=t0, a0=a0, beta=beta)
+    a, b = estimate_spectral_bounds(H)
+    if backend == "torch":
+        mu, a, b = kpm_moments_torch(H, probe_idx, n_moments=n_moments, a=a, b=b, verbose=verbose)
+    else:
+        mu, a, b = kpm_moments(H, probe_idx, n_moments=n_moments, a=a, b=b, verbose=verbose)
+
+    mu_paired, mu_free = mu[:n_paired], mu[n_paired:]
+    ldos_paired = kpm_reconstruct_ldos(mu_paired, a, b, e_grid)
+    ldos_free = kpm_reconstruct_ldos(mu_free, a, b, e_grid)
+
+    w_paired = kpm_window_weight(mu_paired, a, b, e_window=e_window)
+    w_free = kpm_window_weight(mu_free, a, b, e_window=e_window)
+
+    return {
+        "e_grid": e_grid,
+        "paired_spectrum": ldos_paired.mean(axis=0), "paired_spectrum_std": ldos_paired.std(axis=0),
+        "free_spectrum": ldos_free.mean(axis=0), "free_spectrum_std": ldos_free.std(axis=0),
+        "paired_zero_E_weight": float(w_paired.mean()), "paired_zero_E_weight_std": float(w_paired.std()),
+        "free_zero_E_weight": float(w_free.mean()), "free_zero_E_weight_std": float(w_free.std()),
+        "n_paired_atoms": int(is_paired_atom.sum()), "n_free_atoms": int(is_free_atom.sum()),
+        "a": a, "b": b, "pairs": pairs,
+    }
