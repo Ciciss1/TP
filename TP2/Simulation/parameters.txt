@@ -26,7 +26,7 @@ n_runs =        1
 
 # ____Parallelism / reproducibility (optional)____
 n_threads =     2               # OpenMP threads per LAMMPS process
-n_workers =     3               # crystals built in parallel (n_workers * n_threads <= cores)
+n_workers =     27              # crystals built in parallel (n_workers * n_threads <= cores)
 seed =          None            # None = random, saved in each .npz
 skip_existing = False           # do not rebuild crystals already on disk
 lloyd_method =  "lbfgs"         # "lbfgs" (fast) or "lloyd" (plain Lloyd)

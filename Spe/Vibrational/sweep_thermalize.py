@@ -11,7 +11,7 @@ K_INDEX = 1
 
 OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results")
 
-T_KELVIN = 100
+T_KELVIN = 300
 EQUIL_CHECK_PS = 2.0
 EQUIL_MAX_PS = 20.0
 PE_TOL = 0.005
