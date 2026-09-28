@@ -27,7 +27,7 @@ from Properties import (
 )
 
 
-FNAME_RE = re.compile(r"T=(\d+)_k=(\d+)\.npz$")
+FNAME_RE = re.compile(r"T=(\d+)K_k=(\d+)\.npz$")
 
 
 def analyze_file(path, a_CC=1.42, n_theta=720, n_q=300, q_window=0.3):
@@ -38,8 +38,14 @@ def analyze_file(path, a_CC=1.42, n_theta=720, n_q=300, q_window=0.3):
     tout recalculer.
     """
     data = np.load(path)
-    xy = data['xyz'][:, :2]
-    Lx, Ly = data['lattice']
+    if "atoms" in data.files:
+        atoms = data["atoms"]
+        L = float(data["L"][0])
+        Lx, Ly = L, L  # boite carree, nouveau format
+    else:
+        atoms = data["xyz"]
+        Lx, Ly = data["lattice"]  # ancien format
+    xy = atoms[:, :2]
 
     nb_sorted, deg = build_neighbor_array(xy, Lx, Ly, bond_length=a_CC)
     ring_sizes, n_excluded = find_rings_numba(nb_sorted, deg)

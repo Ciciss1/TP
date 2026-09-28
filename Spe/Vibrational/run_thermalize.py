@@ -4,10 +4,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from thermalize import Thermalizer, compute_vdos
 
-INPUT_FILE = r"graphene_pristine_small.npz"
+INPUT_FILE = r"graphene_pristine_match31k.npz"
 OUTPUT_DIR = Path("results")
 
-T_KELVIN = 10        # temperature for thermalization
+T_KELVIN = 300        # temperature for thermalization
 EQUIL_CHECK_PS = 2.0    # NVT chunk length between convergence checks
 EQUIL_MAX_PS = 20.0     # hard cap on NVT time if it never converges
 PE_TOL = 0.005          # relative PE change threshold to stop equilibration early
