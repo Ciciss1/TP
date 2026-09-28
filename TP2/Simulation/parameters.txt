@@ -4,7 +4,7 @@
 
 
 # ____File directory____
-output_dir =    "spe/"
+output_dir =    "/scratch/escarmel/crystals"
 
 # ____Hamiltonian parameters____
 epsilon =       0.0

@@ -5004,3 +5004,7 @@ TP2/Simulation/__pycache__/CG_Relaxation.cpython-311.pyc
 TP2/Simulation/__pycache__/Graphene.cpython-311.pyc
 TP2/Simulation/__pycache__/Lloyd.cpython-311.pyc
 TP2/Simulation/__pycache__/MonteCarlo.cpython-311.pyc
+Spe/Vibrational/sweep_test.sbatch
+TP2/Simulation/log.lammps
+TP2/Simulation/test.sbatch
+TP2/Simulation/__pycache__/Voronoi.cpython-311.pyc

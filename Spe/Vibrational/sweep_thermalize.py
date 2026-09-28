@@ -1,27 +1,29 @@
 import re
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 from thermalize import Thermalizer
 
-RUSLAN_DIR = Path("../../TP2/Simulation/spe")
+RUSLAN_DIR = Path("/scratch/escarmel/crystals")
 FOLDERS = ["eps=0/L=272.12/rho=0.00135"]
 K_INDEX = 1
 
-OUTPUT_DIR = Path("results")
+OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results")
 
-T_KELVIN = 300       # temperature physique de thermalisation AIREBO
+T_KELVIN = 100
 EQUIL_CHECK_PS = 2.0
 EQUIL_MAX_PS = 20.0
 PE_TOL = 0.005
 PROD_PS = 5.0
 AIREBO_FILE = "CH.airebo"
-N_THREADS = 6
+
+THREADS_PER_WORKER = 8
+N_WORKERS = 9
 
 
 def find_crystals(folder: Path, k_index: int):
-    """List (T_mc, path) for all files T=...[K]_k={k_index}.npz in the folder, sorted by T."""
-    pattern = re.compile(rf"T=(\d+)K?_k={k_index}\.npz$")      # K optionnel : nouveaux fichiers et Ruslan
+    pattern = re.compile(rf"T=(\d+)K?_k={k_index}\.npz$")
     found = []
     for f in folder.glob(f"T=*_k={k_index}.npz"):
         m = pattern.match(f.name)
@@ -30,9 +32,26 @@ def find_crystals(folder: Path, k_index: int):
     return sorted(found, key=lambda x: x[0])
 
 
-if __name__ == "__main__":
-    thermalizer = Thermalizer(airebo_file=AIREBO_FILE, n_threads=N_THREADS)
+def process_one(T_mc, path, out_path):
+    thermalizer = Thermalizer(airebo_file=AIREBO_FILE, n_threads=THREADS_PER_WORKER)
 
+    data = np.load(path)
+    if "atoms" in data.files:
+        atoms = data["atoms"]
+        Lx = Ly = float(np.ravel(data["L"])[0])
+    else:
+        atoms, (Lx, Ly) = data["xyz"], data["lattice"]
+
+    result = thermalizer.run(
+        atoms, Lx, Ly, T=T_KELVIN,
+        equil_check_ps=EQUIL_CHECK_PS, equil_max_ps=EQUIL_MAX_PS, pe_tol=PE_TOL,
+        prod_ps=PROD_PS,
+    )
+    result.save(str(out_path))
+    return T_mc, result.converged
+
+
+if __name__ == "__main__":
     for folder_name in FOLDERS:
         src_folder = RUSLAN_DIR / folder_name
         dst_folder = OUTPUT_DIR / folder_name
@@ -41,24 +60,20 @@ if __name__ == "__main__":
         crystals = find_crystals(src_folder, K_INDEX)
         print(f"\n### {folder_name} : {len(crystals)} temperatures (k={K_INDEX}) ###")
 
+        todo = []
         for T_mc, path in crystals:
             out_path = dst_folder / f"T={T_mc}_k={K_INDEX}_thermalized_{int(T_KELVIN)}K.npz"
             if out_path.exists():
                 print(f"  T={T_mc} : deja fait, skip")
                 continue
+            todo.append((T_mc, path, out_path))
 
-            data = np.load(path)
-            if "atoms" in data.files:                     # nouveaux fichiers (Run_Simulation)
-                atoms = data["atoms"]
-                Lx = Ly = float(np.ravel(data["L"])[0])
-            else:                                         # fichiers de Ruslan
-                atoms, (Lx, Ly) = data["xyz"], data["lattice"]
-            print(f"  T={T_mc} : {len(atoms)} atomes, boite {Lx:.1f} x {Ly:.1f} A ...")
-
-            result = thermalizer.run(
-                atoms, Lx, Ly, T=T_KELVIN,
-                equil_check_ps=EQUIL_CHECK_PS, equil_max_ps=EQUIL_MAX_PS, pe_tol=PE_TOL,
-                prod_ps=PROD_PS,
-            )
-            result.save(str(out_path))
-            print(f"    -> converged={result.converged}, sauve dans {out_path}")
+        with ProcessPoolExecutor(max_workers=N_WORKERS) as executor:
+            futures = {executor.submit(process_one, *args): args[0] for args in todo}
+            for future in as_completed(futures):
+                T_mc = futures[future]
+                try:
+                    T_mc, converged = future.result()
+                    print(f"  T={T_mc} : termine, converged={converged}")
+                except Exception as e:
+                    print(f"  T={T_mc} : ECHEC — {e}")
