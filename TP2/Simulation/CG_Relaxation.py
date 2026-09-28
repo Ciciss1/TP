@@ -140,7 +140,7 @@ def parse_minimization_stats(log_file):
 
 
 def minimize_CG(atoms, L, generators, generator_boundary_mask,
-                ftol=1.0, max_steps_2d=500, max_steps_3d=500, etol_2d=0.0, etol_3d=1e-6,
+                ftol=1.0, max_steps_2d=5000, max_steps_3d=5000, etol_2d=0.0, etol_3d=0.0,
                 z_noise=0.05, seed=None, pair_2d=PAIR_2D, pair_3d=PAIR_3D, min_style="cg",
                 skin=1.0, airebo_file="CH.airebo", n_threads=N_THREADS, lmp="lmp"):
     '''
