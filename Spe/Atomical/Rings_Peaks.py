@@ -87,7 +87,9 @@ def collect_results(folder, a_CC=1.42, example_k=None):
     """
     files = sorted(glob.glob(f"{folder}/T=*_k=*.npz"))
     if not files:
-        raise FileNotFoundError(f"Aucun fichier T=*_k=*.npz trouve dans {folder}")
+        files = sorted(glob.glob(f"{folder}/T=*K_k=*.npz"))
+    if not files:
+        raise FileNotFoundError(f"Aucun fichier npz dans {folder}")
 
     results = defaultdict(lambda: defaultdict(list))
     example_profiles = {}
@@ -296,6 +298,6 @@ if __name__ == "__main__":
     results, example_profiles = collect_results(folder)
     plot_results(results, out_dir=folder)
     save_results_npz(results, out_dir=folder)
-    save_diffraction_profiles(example_profiles, out_dir=folder)
-    save_fft_maps(example_profiles, out_dir=folder)
+    # save_diffraction_profiles(example_profiles, out_dir=folder)
+    # save_fft_maps(example_profiles, out_dir=folder)
     save_fft_full_rings(example_profiles, out_dir=folder)

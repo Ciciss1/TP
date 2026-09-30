@@ -299,7 +299,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
             if -1 in vertices or len(vertices) == 0:
                 continue
 
-            polygon = Polygon(self.vor.vertices[vertices]).buffer(0.5)
+            polygon = Polygon(self.vor.vertices[vertices]).buffer(0.05)
 
             min_x, min_y, max_x, max_y = polygon.bounds
             if (max_x < 0 or min_x > self.L or max_y < 0 or min_y > self.L):
