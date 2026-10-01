@@ -5267,3 +5267,14 @@ Spe/Crystals/fft_full_ring/T=100000.npz
 Spe/Crystals/fft_full_ring/T=100000.png
 Spe/Crystals/fft_full_ring/T=120000.npz
 Spe/Crystals/fft_full_ring/T=120000.png
+Spe/Vibrational/__pycache__/vdos_diagnostics.cpython-311.pyc
+Spe/Vibrational/results/graphene_corrugated_thermalized_300K.npz
+Spe/Vibrational/results/graphene_corrugated_vdos_spectrum.png
+Spe/Vibrational/results/graphene_pristine_match31k_thermalized_300K.npz
+Spe/Vibrational/results/graphene_random_ripple_thermalized_300K.npz
+Spe/Vibrational/results/graphene_random_ripple_vdos_spectrum.png
+Spe/Vibrational/results/T10000K_k1_zflat_thermalized_300K.npz
+Spe/Vibrational/results/T10000K_k1_zflat_vdos_spectrum.png
+Spe/Vibrational/graphene_corrugated.npz
+Spe/Vibrational/graphene_random_ripple.npz
+Spe/Vibrational/T10000K_k1_zflat.npz

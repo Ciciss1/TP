@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from thermalize import Thermalizer, compute_vdos
 
-INPUT_FILE = r"graphene_pristine_match31k.npz"
+INPUT_FILE = r"T10000K_k1_zflat.npz"
 OUTPUT_DIR = Path("results")
 
 T_KELVIN = 300        # temperature for thermalization
@@ -21,8 +21,11 @@ if __name__ == "__main__":
     stem = Path(INPUT_FILE).stem  # ex: "T=10000_k=1", sans le chemin ../Ruslan/...
 
     data = np.load(INPUT_FILE)
-    atoms = data["xyz"]
-    Lx, Ly = data["lattice"]
+    if "atoms" in data.files:
+        atoms = data["atoms"]
+        Lx = Ly = float(np.ravel(data["L"])[0])
+    else:
+        atoms, (Lx, Ly) = data["xyz"], data["lattice"]
 
     print(f"{len(atoms)} atomes, boite {Lx:.2f} x {Ly:.2f} A")
 
