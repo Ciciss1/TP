@@ -4,7 +4,7 @@
 
 
 # ____File directory____
-output_dir =    "/scratch/escarmel/crystals"
+output_dir =    "/scratch/escarmel/crystals_big"
 
 # ____Hamiltonian parameters____
 epsilon =       0.0
@@ -14,7 +14,7 @@ alpha =         1.70            # (eV/AA)
 beta_RS =       -0.161
 
 # ____Lattice parameters____
-L =             272.12            # (AA)
+L =             544.33            # (AA)
 rho =           0.00135          # (grains/AA^2)
 
 # ____Monte Carlo parameters____
