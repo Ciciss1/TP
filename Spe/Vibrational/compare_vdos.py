@@ -17,7 +17,7 @@ def load_vdos(npz_path: Path):
 
 if __name__ == "__main__":
     # Usage : python compare_vdos.py fichier1.npz fichier2.npz fichier3.npz
-    paths = ["/scratch/escarmel/thermalize_results/eps=0/L=272.12/rho=0.00135/T=10000_k=1_thermalized_300K.npz", "/scratch/escarmel/thermalize_results/eps=0/L=272.12/rho=0.00135/T=86000_k=1_thermalized_300K.npz", "/scratch/escarmel/thermalize_results/eps=0/L=272.12/rho=0.00135/T=120000_k=1_thermalized_300K.npz"]
+    paths = ["thermalize_results/T=10000_k=1_thermalized_300K.npz", "thermalize_results/T=120000_k=1_thermalized_300K.npz", "results/graphene_pristine_accMatch_thermalized_300K.npz"]
     if not paths:
         raise SystemExit("Donne au moins un chemin .npz en argument")
 

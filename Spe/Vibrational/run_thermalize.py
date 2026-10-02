@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from thermalize import Thermalizer, compute_vdos
 
-INPUT_FILE = r"T10000K_k1_zflat.npz"
+INPUT_FILE = r"graphene_pristine_accMatch.npz"
 OUTPUT_DIR = Path("results")
 
 T_KELVIN = 300        # temperature for thermalization
