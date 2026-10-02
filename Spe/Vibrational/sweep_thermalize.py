@@ -5,11 +5,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 from thermalize import Thermalizer
 
-RUSLAN_DIR = Path("/scratch/escarmel/crystals")
+RUSLAN_DIR = Path("/scratch/escarmel/crystals_2D/")
 FOLDERS = ["eps=0/L=272.12/rho=0.00135"]
 K_INDEX = 1
 
-OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results")
+OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results_2D/")
 
 T_KELVIN = 300
 EQUIL_CHECK_PS = 2.0
