@@ -23,9 +23,12 @@ if __name__ == "__main__":
     data = np.load(INPUT_FILE)
     if "atoms" in data.files:
         atoms = data["atoms"]
-        Lx = Ly = float(np.ravel(data["L"])[0])
     else:
-        atoms, (Lx, Ly) = data["xyz"], data["lattice"]
+        atoms = data["xyz"]
+    if "lattice" in data.files:
+        Lx, Ly = data["lattice"]
+    else:
+        Lx = Ly = data["L"]
 
     print(f"{len(atoms)} atomes, boite {Lx:.2f} x {Ly:.2f} A")
 

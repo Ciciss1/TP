@@ -291,6 +291,8 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         base_lattice = generate_triangular_lattice(patch_L, a_CC)
         all_generators = []
 
+        owner_tree = cKDTree(self.all_points)
+
         # Construct the generators for each grain by rotating and moving the base lattice
         for grain in range(len(self.all_points)):
             region_idx = self.vor.point_region[grain]
@@ -320,7 +322,8 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
 
             rot_atoms = rot_atoms[mask]
 
-            inside = contains_xy(polygon, rot_atoms[:, 0], rot_atoms[:, 1])
+            _, owner = owner_tree.query(rot_atoms)
+            inside = owner == grain
             all_generators.append(rot_atoms[inside])
 
         generators = np.vstack(all_generators)
@@ -441,6 +444,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
             relaxed_generators = self.relaxed_generators,
             atoms = self.atoms,
             bonds = self.bonds,
+            lattice = np.array([self.Lx, self.Ly]),
             **diag,
         )
 

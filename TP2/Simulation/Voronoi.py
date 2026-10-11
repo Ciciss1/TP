@@ -67,7 +67,7 @@ class PeriodicVoronoi:
         '''
         self.L = L
         self.rho = rho
-        self.N = max(1, int(rho * L * L))
+        self.N = max(1, int(np.round(rho * L * L)))
 
         self.points = pick_substrate_points(np.array(generate_ir_111_substrate(2 * L)), self.N, L)
                

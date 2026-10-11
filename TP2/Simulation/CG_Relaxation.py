@@ -5,14 +5,15 @@ import tempfile
 import numpy as np
 from scipy.spatial import cKDTree
 
-N_THREADS = 6
-Z_VACUUM = 10.0
+N_THREADS = 2
+Z_VACUUM = 30.0
 C_MASS = 12.011
 
-# Stage 1 (planar, only atoms near the grain boundaries move): REBO only (AIREBO with the LJ and
-# torsion terms switched off). The LJ term is the expensive part of AIREBO and is irrelevant for
-# an in-plane pre-relaxation of the bond network.
-PAIR_2D = "airebo 3.0 0 0"
+C_MASS = 12.011
+BAR_TO_N_M = 1e-5
+
+# Stage 1 (planar, only atoms near the grain boundaries move)
+PAIR_2D = "airebo 3.0 1 1"
 # Stage 2 (3D, all atoms): full AIREBO
 PAIR_3D = "airebo 3.0 1 1"
 
@@ -59,14 +60,19 @@ def write_lammps_data(atoms, types, L, path):
         table = np.column_stack([np.arange(1, N + 1), types, pos[:, 0], pos[:, 1], pos[:, 2]])
         np.savetxt(f, table, fmt="%d %d %.8f %.8f %.8f")
 
+def stress_to_pressure(sigma_2d):
+    return -sigma_2d / (2 * Z_VACUUM * BAR_TO_N_M)
+
 
 def write_lammps_input(data_file, dump_file, airebo_abs, ftol, max_steps_2d, max_steps_3d,
-                       etol_2d, etol_3d, z_noise, seed, pair_2d, pair_3d, min_style, skin):
+                       etol_2d, etol_3d, z_noise, seed, pair_2d, pair_3d, min_style, skin, sigma0=1.0):
     '''
     LAMMPS script running both relaxation stages in a single process:
         1. planar minimisation, only the type-1 atoms move, z frozen
         2. random z displacement, then 3D minimisation of all atoms
     '''
+    P0 = stress_to_pressure(sigma0)
+    min_box = f"minimize        {etol_3d} {ftol * 10} 500 5000"
     return f"""
 units           metal
 atom_style      atomic
@@ -85,25 +91,50 @@ pair_coeff      * * {airebo_abs} C C
 fix             freeze fixed setforce 0.0 0.0 0.0
 fix             planar all setforce NULL NULL 0.0
 min_style       {min_style}
-minimize        {etol_2d} {ftol} {max_steps_2d} {10 * max_steps_2d}
+minimize        {etol_2d} {ftol * 10} {max_steps_2d} {10 * max_steps_2d}
 unfix           freeze
 unfix           planar
 
-# ---------- Stage 2 : out-of-plane relaxation of all atoms ----------
+# ---------- Stage 2 : corrugation fixed box ----------
 displace_atoms  all random 0.0 0.0 {z_noise} {seed} units box
 pair_style      {pair_3d}
 pair_coeff      * * {airebo_abs} C C
 min_style       {min_style}
 minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
 
+# ---------- Stage 3 : relaxation of the box ----------
+variable        lxp equal 0.0
+variable        lyp equal 0.0
+label           boxloop
+variable        c loop 30
+min_style       cg
+fix             relax all box/relax x {P0:.4f} y {P0:.4f} couple none vmax 0.001 nreset 50
+{min_box}
+{min_box}
+unfix           relax
+min_style       {min_style}
+minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
+run             0
+print           "BOXCYCLE $c $(lx:%.5f) $(ly:%.5f) $(pxx:%.3f) $(pyy:%.3f) $(fnorm:%.5f)"
+if              "$c > 1 && $(abs(lx-v_lxp)/lx) < 5e-5 && $(abs(ly-v_lyp)/ly) < 5e-5" then "jump SELF boxdone"
+variable        lxp equal $(lx)
+variable        lyp equal $(ly)
+next            c
+jump            SELF boxloop
+label           boxdone
+ 
 write_dump      all custom {dump_file} id x y z modify sort id
+
 """
 
 
-def read_lammps_dump(dump_file, N, L):
-    '''
-    Read the positions written by write_dump (sorted by id)
-    '''
+def read_lammps_dump(dump_file, N):
+    with open(dump_file) as f:
+        header = [next(f) for _ in range(9)]
+    xlo, xhi = map(float, header[5].split()[:2])
+    ylo, yhi = map(float, header[6].split()[:2])
+    Lx, Ly = xhi - xlo, yhi - ylo
+
     data = np.loadtxt(dump_file, skiprows=9)
     if data.ndim == 1:
         data = data[None, :]
@@ -112,9 +143,9 @@ def read_lammps_dump(dump_file, N, L):
     pos = np.empty((N, 3))
     ids = data[:, 0].astype(np.int64) - 1
     pos[ids] = data[:, 1:4]
-    pos[:, 0] = np.mod(pos[:, 0], L)
-    pos[:, 1] = np.mod(pos[:, 1], L)
-    return pos
+    pos[:, 0] = np.mod(pos[:, 0] - xlo, Lx)   # on recale l'origine au cas où la boîte a bougé
+    pos[:, 1] = np.mod(pos[:, 1] - ylo, Ly)
+    return pos, (Lx, Ly)
 
 
 def parse_minimization_stats(log_file):
@@ -140,8 +171,7 @@ def parse_minimization_stats(log_file):
 
 
 def minimize_CG(atoms, L, generators, generator_boundary_mask,
-                ftol=1.0, max_steps_2d=5000, max_steps_3d=5000, etol_2d=0.0, etol_3d=0.0,
-                z_noise=0.05, seed=None, pair_2d=PAIR_2D, pair_3d=PAIR_3D, min_style="cg",
+                ftol=5e-4, max_steps_2d=3000, max_steps_3d=3000, etol_2d=0.0, etol_3d=0.0, z_noise=0.05, seed=None, pair_2d=PAIR_2D, pair_3d=PAIR_3D, min_style="cg",
                 skin=1.0, airebo_file="CH.airebo", n_threads=N_THREADS, lmp="lmp"):
     '''
     Relax a polycrystalline graphene sheet with LAMMPS (planar stage then 3D stage)
@@ -170,6 +200,8 @@ def minimize_CG(atoms, L, generators, generator_boundary_mask,
     atoms = np.asarray(atoms, dtype=np.float64)
     if atoms.shape[1] == 2:
         atoms = np.hstack([atoms, np.zeros((len(atoms), 1))])
+
+    ftol = ftol * np.sqrt(3 * len(atoms))
 
     free = atom_boundary_mask_from_generators(atoms, generators, generator_boundary_mask, L)
     types = np.where(free, 1, 2)
@@ -202,8 +234,9 @@ def minimize_CG(atoms, L, generators, generator_boundary_mask,
                 f"Log (last 3000 chars):\n{log_content[-3000:]}"
             )
 
-        pos = read_lammps_dump(dump_file, len(atoms), L)
+        pos, (Lx, Ly) = read_lammps_dump(dump_file, len(atoms))
         stats = parse_minimization_stats(log_file)
+        stats["Lx"], stats["Ly"] = Lx, Ly
 
     stats["n_free_2d"] = int(np.sum(free))
     stats["seed"] = seed
@@ -215,5 +248,6 @@ class CGRelaxation:
     def relaxation_CG(self, atoms, generators, generator_boundary_mask, **kwargs):
         pos, stats = minimize_CG(atoms=atoms, L=self.L, generators=generators,
                                  generator_boundary_mask=generator_boundary_mask, **kwargs)
+        self.Lx, self.Ly = stats.pop("Lx"), stats.pop("Ly")
         self.lammps_info = stats
         return pos

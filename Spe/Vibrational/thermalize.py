@@ -11,7 +11,7 @@ from typing import Optional
 import numpy as np
 
 C_MASS = 12.011        # amu, carbon
-Z_VACUUM = 10.0         # Angstrom
+Z_VACUUM = 30.0         # Angstrom
 TIMESTEP_PS = 0.001     # 1 fs ; LAMMPS 'units metal' -> time in ps
 
 # LAMMPS backend: "omp"/"gpu"/"kk"
