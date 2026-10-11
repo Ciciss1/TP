@@ -5456,3 +5456,4 @@ Spe/Vibrational/rho=0.00135/T=100000_k=1_thermalized_300K_vdos_spectrum.png
 Spe/Vibrational/rho=0.00135/T=100000_k=1_thermalized_300K.npz
 Spe/Vibrational/rho=0.00135/T=120000_k=1_thermalized_300K_vdos_spectrum.png
 Spe/Vibrational/rho=0.00135/T=120000_k=1_thermalized_300K.npz
+Spe/Vibrational/plot_thermalize.sbatch

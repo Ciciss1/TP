@@ -441,6 +441,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
             relaxed_generators = self.relaxed_generators,
             atoms = self.atoms,
             bonds = self.bonds,
+            lattice = np.array([self.Lx, self.Ly]),
             **diag,
         )
 

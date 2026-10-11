@@ -5,14 +5,12 @@ import tempfile
 import numpy as np
 from scipy.spatial import cKDTree
 
-N_THREADS = 6
+N_THREADS = 2
 Z_VACUUM = 10.0
 C_MASS = 12.011
 
-# Stage 1 (planar, only atoms near the grain boundaries move): REBO only (AIREBO with the LJ and
-# torsion terms switched off). The LJ term is the expensive part of AIREBO and is irrelevant for
-# an in-plane pre-relaxation of the bond network.
-PAIR_2D = "airebo 3.0 0 0"
+# Stage 1 (planar, only atoms near the grain boundaries move)
+PAIR_2D = "airebo 3.0 1 1"
 # Stage 2 (3D, all atoms): full AIREBO
 PAIR_3D = "airebo 3.0 1 1"
 
@@ -89,21 +87,38 @@ minimize        {etol_2d} {ftol} {max_steps_2d} {10 * max_steps_2d}
 unfix           freeze
 unfix           planar
 
-# ---------- Stage 2 : out-of-plane relaxation of all atoms ----------
+# ---------- Stage 2 : corrugation fixed box ----------
 displace_atoms  all random 0.0 0.0 {z_noise} {seed} units box
 pair_style      {pair_3d}
 pair_coeff      * * {airebo_abs} C C
 min_style       {min_style}
 minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
 
-write_dump      all custom {dump_file} id x y z modify sort id
+# ---------- Stage 3 : relaxation of the box ----------
+fix             tether all spring/self 50 z
+fix_modify      tether energy yes
+
+fix             relax all box/relax x 0.0 y 0.0 couple none vmax 0.001
+minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
+minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
+
+unfix           relax
+unfix           tether
+
+# ---------- Stage 4 : small relaxation ----------
+minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
+
+write_dump     all custom {dump_file} id x y z modify sort id
 """
 
 
-def read_lammps_dump(dump_file, N, L):
-    '''
-    Read the positions written by write_dump (sorted by id)
-    '''
+def read_lammps_dump(dump_file, N):
+    with open(dump_file) as f:
+        header = [next(f) for _ in range(9)]
+    xlo, xhi = map(float, header[5].split()[:2])
+    ylo, yhi = map(float, header[6].split()[:2])
+    Lx, Ly = xhi - xlo, yhi - ylo
+
     data = np.loadtxt(dump_file, skiprows=9)
     if data.ndim == 1:
         data = data[None, :]
@@ -112,9 +127,9 @@ def read_lammps_dump(dump_file, N, L):
     pos = np.empty((N, 3))
     ids = data[:, 0].astype(np.int64) - 1
     pos[ids] = data[:, 1:4]
-    pos[:, 0] = np.mod(pos[:, 0], L)
-    pos[:, 1] = np.mod(pos[:, 1], L)
-    return pos
+    pos[:, 0] = np.mod(pos[:, 0] - xlo, Lx)   # on recale l'origine au cas où la boîte a bougé
+    pos[:, 1] = np.mod(pos[:, 1] - ylo, Ly)
+    return pos, (Lx, Ly)
 
 
 def parse_minimization_stats(log_file):
@@ -140,8 +155,7 @@ def parse_minimization_stats(log_file):
 
 
 def minimize_CG(atoms, L, generators, generator_boundary_mask,
-                ftol=1.0, max_steps_2d=5000, max_steps_3d=5000, etol_2d=0.0, etol_3d=0.0,
-                z_noise=0.05, seed=None, pair_2d=PAIR_2D, pair_3d=PAIR_3D, min_style="cg",
+                ftol=1.0, max_steps_2d=3000, max_steps_3d=3000, etol_2d=0.0, etol_3d=0.0, z_noise=0.05, seed=None, pair_2d=PAIR_2D, pair_3d=PAIR_3D, min_style="cg",
                 skin=1.0, airebo_file="CH.airebo", n_threads=N_THREADS, lmp="lmp"):
     '''
     Relax a polycrystalline graphene sheet with LAMMPS (planar stage then 3D stage)
@@ -202,8 +216,9 @@ def minimize_CG(atoms, L, generators, generator_boundary_mask,
                 f"Log (last 3000 chars):\n{log_content[-3000:]}"
             )
 
-        pos = read_lammps_dump(dump_file, len(atoms), L)
+        pos, (Lx, Ly) = read_lammps_dump(dump_file, len(atoms))
         stats = parse_minimization_stats(log_file)
+        stats["Lx"], stats["Ly"] = Lx, Ly
 
     stats["n_free_2d"] = int(np.sum(free))
     stats["seed"] = seed
@@ -215,5 +230,6 @@ class CGRelaxation:
     def relaxation_CG(self, atoms, generators, generator_boundary_mask, **kwargs):
         pos, stats = minimize_CG(atoms=atoms, L=self.L, generators=generators,
                                  generator_boundary_mask=generator_boundary_mask, **kwargs)
+        self.Lx, self.Ly = stats.pop("Lx"), stats.pop("Ly")
         self.lammps_info = stats
         return pos

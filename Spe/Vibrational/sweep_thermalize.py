@@ -5,11 +5,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 from thermalize import Thermalizer
 
-RUSLAN_DIR = Path("/scratch/escarmel/crystals_2D/")
-FOLDERS = ["eps=0/L=272.12/rho=0.00135"]
+RUSLAN_DIR = Path("/scratch/escarmel/crystal_big_grains/")
+FOLDERS = ["eps=0/L=565.7/rho=0.00015626"]
 K_INDEX = 1
 
-OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results_2D/")
+OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results_big_grains/")
 
 T_KELVIN = 300
 EQUIL_CHECK_PS = 2.0
@@ -38,9 +38,12 @@ def process_one(T_mc, path, out_path):
     data = np.load(path)
     if "atoms" in data.files:
         atoms = data["atoms"]
-        Lx = Ly = float(np.ravel(data["L"])[0])
     else:
-        atoms, (Lx, Ly) = data["xyz"], data["lattice"]
+        atoms = data["xyz"]
+    if "lattice" in data.files:
+        Lx, Ly = data["lattice"]
+    else:
+        Lx = Ly = data["L"]
 
     result = thermalizer.run(
         atoms, Lx, Ly, T=T_KELVIN,
