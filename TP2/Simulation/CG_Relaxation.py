@@ -6,8 +6,11 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 N_THREADS = 2
-Z_VACUUM = 10.0
+Z_VACUUM = 30.0
 C_MASS = 12.011
+
+C_MASS = 12.011
+BAR_TO_N_M = 1e-5
 
 # Stage 1 (planar, only atoms near the grain boundaries move)
 PAIR_2D = "airebo 3.0 1 1"
@@ -57,14 +60,19 @@ def write_lammps_data(atoms, types, L, path):
         table = np.column_stack([np.arange(1, N + 1), types, pos[:, 0], pos[:, 1], pos[:, 2]])
         np.savetxt(f, table, fmt="%d %d %.8f %.8f %.8f")
 
+def stress_to_pressure(sigma_2d):
+    return -sigma_2d / (2 * Z_VACUUM * BAR_TO_N_M)
+
 
 def write_lammps_input(data_file, dump_file, airebo_abs, ftol, max_steps_2d, max_steps_3d,
-                       etol_2d, etol_3d, z_noise, seed, pair_2d, pair_3d, min_style, skin):
+                       etol_2d, etol_3d, z_noise, seed, pair_2d, pair_3d, min_style, skin, sigma0=1.0):
     '''
     LAMMPS script running both relaxation stages in a single process:
         1. planar minimisation, only the type-1 atoms move, z frozen
         2. random z displacement, then 3D minimisation of all atoms
     '''
+    P0 = stress_to_pressure(sigma0)
+    min_box = f"minimize        {etol_3d} {ftol * 10} 500 5000"
     return f"""
 units           metal
 atom_style      atomic
@@ -83,7 +91,7 @@ pair_coeff      * * {airebo_abs} C C
 fix             freeze fixed setforce 0.0 0.0 0.0
 fix             planar all setforce NULL NULL 0.0
 min_style       {min_style}
-minimize        {etol_2d} {ftol} {max_steps_2d} {10 * max_steps_2d}
+minimize        {etol_2d} {ftol * 10} {max_steps_2d} {10 * max_steps_2d}
 unfix           freeze
 unfix           planar
 
@@ -95,20 +103,28 @@ min_style       {min_style}
 minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
 
 # ---------- Stage 3 : relaxation of the box ----------
-fix             tether all spring/self 50 z
-fix_modify      tether energy yes
-
-fix             relax all box/relax x 0.0 y 0.0 couple none vmax 0.001
-minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
-minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
-
+variable        lxp equal 0.0
+variable        lyp equal 0.0
+label           boxloop
+variable        c loop 30
+min_style       cg
+fix             relax all box/relax x {P0:.4f} y {P0:.4f} couple none vmax 0.001 nreset 50
+{min_box}
+{min_box}
 unfix           relax
-unfix           tether
-
-# ---------- Stage 4 : small relaxation ----------
+min_style       {min_style}
 minimize        {etol_3d} {ftol} {max_steps_3d} {10 * max_steps_3d}
+run             0
+print           "BOXCYCLE $c $(lx:%.5f) $(ly:%.5f) $(pxx:%.3f) $(pyy:%.3f) $(fnorm:%.5f)"
+if              "$c > 1 && $(abs(lx-v_lxp)/lx) < 5e-5 && $(abs(ly-v_lyp)/ly) < 5e-5" then "jump SELF boxdone"
+variable        lxp equal $(lx)
+variable        lyp equal $(ly)
+next            c
+jump            SELF boxloop
+label           boxdone
+ 
+write_dump      all custom {dump_file} id x y z modify sort id
 
-write_dump     all custom {dump_file} id x y z modify sort id
 """
 
 
@@ -155,7 +171,7 @@ def parse_minimization_stats(log_file):
 
 
 def minimize_CG(atoms, L, generators, generator_boundary_mask,
-                ftol=1.0, max_steps_2d=3000, max_steps_3d=3000, etol_2d=0.0, etol_3d=0.0, z_noise=0.05, seed=None, pair_2d=PAIR_2D, pair_3d=PAIR_3D, min_style="cg",
+                ftol=5e-4, max_steps_2d=3000, max_steps_3d=3000, etol_2d=0.0, etol_3d=0.0, z_noise=0.05, seed=None, pair_2d=PAIR_2D, pair_3d=PAIR_3D, min_style="cg",
                 skin=1.0, airebo_file="CH.airebo", n_threads=N_THREADS, lmp="lmp"):
     '''
     Relax a polycrystalline graphene sheet with LAMMPS (planar stage then 3D stage)
@@ -184,6 +200,8 @@ def minimize_CG(atoms, L, generators, generator_boundary_mask,
     atoms = np.asarray(atoms, dtype=np.float64)
     if atoms.shape[1] == 2:
         atoms = np.hstack([atoms, np.zeros((len(atoms), 1))])
+
+    ftol = ftol * np.sqrt(3 * len(atoms))
 
     free = atom_boundary_mask_from_generators(atoms, generators, generator_boundary_mask, L)
     types = np.where(free, 1, 2)

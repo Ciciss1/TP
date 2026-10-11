@@ -68,14 +68,15 @@ def anneal_one_run(run_idx, p):
 
     vor = PeriodicVoronoi(p["L"], p["rho"])
     theta = vor.theta.copy()
+    delta = 0.1
 
     tasks = []
     for t_idx, T in enumerate(sorted(p["T"], reverse=True)):
         t0 = time.perf_counter()
-        theta, energy_history, misor_history = monte_carlo(
+        theta, energy_history, misor_history, delta = monte_carlo(
             theta, vor.adj_i, vor.adj_j, vor.adj_length, vor.areas, beta=1.0 / T,
             epsilon=p["epsilon"], gamma=p["gamma"], phi_s2=phi_s2, phi_s4=phi_s4,
-            alpha=p["alpha"], beta_RS=p["beta_RS"], n_sweeps=p["n_monte_carlo"], use_tqdm=False
+            alpha=p["alpha"], beta_RS=p["beta_RS"], n_sweeps=p["n_monte_carlo"], use_tqdm=False, delta_theta=delta
         )
         n_done = len(energy_history)
         converged = n_done < p["n_monte_carlo"]

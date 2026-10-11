@@ -174,9 +174,10 @@ def mean_misorientation(theta, adj_i, adj_j, adj_length):
         total_l += adj_length[k]
     return total_dl / total_l
 
-def monte_carlo(theta, adj_i, adj_j, adj_length, areas, beta, epsilon, gamma, phi_s2, phi_s4, alpha, beta_RS, n_sweeps = 100_000, log_every=1000, thermodynamic_window=1000, min_eff_samples=100, use_tqdm=True):
-
-    delta_theta = 0.1
+def monte_carlo(theta, adj_i, adj_j, adj_length, areas, beta, epsilon, gamma, phi_s2, phi_s4, alpha, beta_RS, n_sweeps = 200_000, log_every=1000, thermodynamic_window=1000, min_eff_samples=100, use_tqdm=True, delta_theta = 0.1, adapt_every=100, target_acceptance = 0.5):
+    adapting = True
+    adapt_att = 0
+    adapt_acc = 0
     attempts = 0
     accepts = 0
 
@@ -195,6 +196,14 @@ def monte_carlo(theta, adj_i, adj_j, adj_length, areas, beta, epsilon, gamma, ph
         a, acc = metropolis_sweep(theta, adj_i, adj_j, adj_length, areas, beta, delta_theta, epsilon, gamma, phi_s2, phi_s4, alpha, beta_RS)
         attempts += a
         accepts += acc
+        adapt_att += a
+        adapt_acc += acc
+
+        if adapting and (sweep + 1) % adapt_every == 0:
+            ratio = (adapt_acc / adapt_att) / target_acceptance if adapt_att > 0 else 1.0
+            delta_theta = float(min(max(delta_theta * min(max(ratio, 0.8), 1.25), 1e-4), PI/6))
+            adapt_att = 0
+            adapt_acc = 0
 
         E = energy(theta, adj_i, adj_j, adj_length, areas, epsilon, gamma, phi_s2, phi_s4, alpha, beta_RS)
         misorientation = mean_misorientation(theta, adj_i, adj_j, adj_length)
@@ -203,8 +212,6 @@ def monte_carlo(theta, adj_i, adj_j, adj_length, areas, beta, epsilon, gamma, ph
         misor_history.append(misorientation)
 
         if sweep % log_every == 0 and sweep > 0:
-            acceptance_rate = accepts / attempts if attempts > 0 else 0
-            delta_theta = adapt_delta(delta_theta, acceptance_rate)
             attempts = 0
             accepts = 0
 
@@ -221,10 +228,13 @@ def monte_carlo(theta, adj_i, adj_j, adj_length, areas, beta, epsilon, gamma, ph
             if mean_E_priv is not None and mean_misor_priv is not None:
                 stable = (np.abs(mean_E - mean_E_priv) < 2 * np.sqrt(std_E**2 + std_E_priv**2)) and (np.abs(mean_misor - mean_misor_priv) < 2 * np.sqrt(std_misor**2 + std_misor_priv**2))
                 equilibrium_counter = equilibrium_counter + 1 if stable else max(0, equilibrium_counter - 2)
+                if equilibrium_counter > 0:
+                    adapting = False
 
             if equilibrium_counter >= 10:
-                eff_E = window / max(2 * tau_E, 1e-10)
-                eff_misor = window / max(2 * tau_misor, 1e-10)
+                n_avail = min(len(energy_history), window)
+                eff_E = n_avail / max(2 * tau_E, 1e-10)
+                eff_misor = n_avail / max(2 * tau_misor, 1e-10)
                 if eff_E >= min_eff_samples and eff_misor >= min_eff_samples:
                     if use_tqdm:
                         print(f"Equilibrium reached at sweep {sweep}.")
@@ -235,4 +245,4 @@ def monte_carlo(theta, adj_i, adj_j, adj_length, areas, beta, epsilon, gamma, ph
             std_E_priv = std_E
             std_misor_priv = std_misor
 
-    return theta, energy_history, misor_history
+    return theta, energy_history, misor_history, delta_theta
