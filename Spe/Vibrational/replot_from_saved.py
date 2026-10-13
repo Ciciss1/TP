@@ -4,6 +4,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from thermalize import ThermalizationResult, compute_vdos
 
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap, Normalize
+
 OUTPUT_DIR = Path("results")
 FREQ_MAX_THZ = 60.0
 
@@ -49,11 +53,43 @@ if __name__ == "__main__":
     # (recursif, donc marche aussi sur results/ avec les 4 sous-dossiers de sweep_thermalize.py).
     target = Path(sys.argv[1]) if len(sys.argv) > 1 else OUTPUT_DIR
 
-    if target.is_dir():
-        files = sorted(target.rglob("*.npz"))
-        print(f"{len(files)} fichier(s) trouve(s) dans {target}")
-    else:
-        files = [target]
+    # if target.is_dir():
+    #     files = sorted(target.rglob("*.npz"))
+    #     print(f"{len(files)} fichier(s) trouve(s) dans {target}")
+    # else:
+    #     files = [target]
 
-    for npz_path in files:
-        plot_one(npz_path)
+    # for npz_path in files:
+    #     plot_one(npz_path)
+
+    FMAX = 2000                                    # cm^-1
+
+    files = sorted((int(re.match(r"T=(\d+)", f.name).group(1)), f)
+               for f in target.glob("T=*_thermalized_*.npz"))
+    if not files:
+        raise SystemExit(f"Aucun T=..._thermalized_*.npz dans {target}")
+
+    cmap = LinearSegmentedColormap.from_list("T", ["#9ec5f4", "#2a78d6", "#0d366b"])
+    norm = Normalize(files[0][0], files[-1][0])
+    fig, ax = plt.subplots(figsize=(10, 5))
+
+    for T, f in files:
+        d = np.load(f)
+        t = d["times_ps"]
+        freq, s = compute_vdos(d["velocities"], dt_frame_ps=t[1] - t[0])
+        freq = freq * 33.356                       # THz -> cm^-1
+        m = freq <= FMAX
+        s = s[m] / (s[m].sum() * (freq[1] - freq[0]))   # aire = 1
+        ax.plot(freq[m], s, color=cmap(norm(T)), lw=0.8)
+        print(f"T_MC = {T} K  ({f.name})")
+
+    fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, label=r"$T_{MC}$ (K)")
+    ax.set_xlabel("Frequency (cm$^{-1}$)")
+    ax.set_ylabel("VDOS")
+    ax.set_xlim(0, FMAX)
+    ax.set_title(target.name)
+    fig.tight_layout()
+    out = target / "vdos_all_T.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"-> {out}")

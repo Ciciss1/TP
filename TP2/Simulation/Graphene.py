@@ -10,6 +10,9 @@ from numba import njit
 from shapely.geometry import Polygon
 from shapely import contains_xy
 from scipy.spatial import Voronoi, cKDTree
+from scipy.sparse import coo_matrix, diags
+from scipy.sparse.csgraph import minimum_spanning_tree, breadth_first_order
+from scipy.sparse.linalg import spsolve
 
 from Voronoi import PeriodicVoronoi
 from Lloyd import Lloyd, _periodic_images
@@ -86,6 +89,99 @@ def compute_neighbors(atoms, bonds):
                 neighbors[j, slot] = i
                 break
     return neighbors
+
+
+def nearest_lattice_vectors(v, B):
+    '''
+    Vectors of the lattices of bases B (primitive vectors as columns, (2, 2) or (n, 2, 2)) closest to v (n, 2)
+    '''
+    v = np.atleast_2d(v)
+    B = np.broadcast_to(B, (len(v), 2, 2))
+    cells = np.floor(np.linalg.solve(B, v[:, :, None])[:, :, 0])[:, None, :] + np.array([[0, 0], [1, 0], [0, 1], [1, 1]])
+    pts = np.einsum("nij,nkj->nki", B, cells)
+    return pts[np.arange(len(v)), np.argmin(((pts - v[:, None]) ** 2).sum(axis=2), axis=1)]
+
+
+def boundary_views(points, theta, all_points, vor):
+    '''
+    Grain boundaries seen from each central grain
+    Outputs:
+        owner : central grain (n,)
+        other : neighbouring grain, index in all_points (n,)
+        segs : end points of the boundary (n, 2, 2)
+        dtheta : misorientation (n,)
+    '''
+    N = len(points)
+    rp, rv = vor.ridge_points, np.asarray(vor.ridge_vertices)
+    owner, other, segs = [], [], []
+    for col in (0, 1):
+        sel = (rv >= 0).all(axis=1) & (rp[:, col] >= 4 * N) & (rp[:, col] < 5 * N) & (rp[:, 0] % N != rp[:, 1] % N)
+        owner.append(rp[sel, col] - 4 * N)
+        other.append(rp[sel, 1 - col])
+        segs.append(vor.vertices[rv[sel]])
+    owner, other, segs = np.concatenate(owner), np.concatenate(other), np.concatenate(segs)
+    ok = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1) > 1e-10
+    owner, other, segs = owner[ok], other[ok], segs[ok]
+    dtheta = np.abs((theta[owner] - theta[other % N] + np.pi / 6) % (np.pi / 3) - np.pi / 6)
+    return owner, other, segs, dtheta
+
+
+def lattice_origins(points, bases, all_points, owner, other, segs, dtheta, theta_c = np.radians(3.0)):
+    '''
+    Rigid translation of each grain lattice. Along the maximum spanning tree of the grain graph, weighted
+    by l exp(-dtheta / theta_c) (l : boundary length), the lattice point of the parent closest to the
+    middle of the common boundary is made a lattice point of the child: aligned neighbours form a single
+    crystal and weakly misoriented ones are in registry. The frustration of the loops of grains ends up
+    on the non-tree edges, i.e. on the most misoriented and shortest boundaries.
+    '''
+    N = len(points)
+    w = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1) * np.exp(-dtheta / theta_c)
+    best = {}
+    for k in np.argsort(w):                               # heaviest boundary of each pair of grains
+        best[(int(owner[k]), int(other[k] % N))] = k
+    ks = np.array(list(best.values()))
+    tree = minimum_spanning_tree(coo_matrix((1 / w[ks], (owner[ks], other[ks] % N)), shape=(N, N)).tocsr())
+    order, pred = breadth_first_order(tree + tree.T, 0, directed=False)
+
+    origins = np.array(points, dtype=np.float64)
+    for child in order[1:]:
+        parent = pred[child]
+        k = best[(int(parent), int(child))]
+        q = origins[parent] + nearest_lattice_vectors(segs[k].mean(axis=0) - origins[parent], bases[parent])[0]
+        o = q - (all_points[other[k]] - points[child])
+        origins[child] = o + nearest_lattice_vectors(points[child] - o, bases[child])[0]
+    return origins
+
+
+def blend_displacement(x, segs, n_origins, n_bases, dtheta, a, theta_b = np.radians(15.0)):
+    '''
+    Elastic accommodation of the boundaries of one grain. A generator within a of a boundary is moved
+    halfway towards the closest point of the neighbour lattice (the neighbour does the same), so that
+    the two lattices meet continuously; the misfit, wrapped into the unit cell, only jumps where it
+    reaches half a lattice vector, i.e. at the geometrically necessary dislocations. The other generators
+    follow the discrete harmonic extension of these displacements. Switched off for high-angle
+    boundaries by 1 / (1 + (dtheta / theta_b)^4).
+    '''
+    disp = np.zeros_like(x)
+    t = segs[:, 1] - segs[:, 0]
+    u = np.clip(((x[:, None] - segs[None, :, 0]) * t).sum(axis=2) / (t * t).sum(axis=1), 0, 1)
+    d = np.linalg.norm(x[:, None] - segs[None, :, 0] - u[:, :, None] * t, axis=2)
+    k = np.argmin(d, axis=1)
+    bnd = d[np.arange(len(x)), k] < a
+    if not bnd.any():
+        return disp
+    o = n_origins[k[bnd]]
+    rho = x[bnd] - o - nearest_lattice_vectors(x[bnd] - o, n_bases[k[bnd]])
+    disp[bnd] = -0.5 * rho / (1 + (dtheta[k[bnd]] / theta_b) ** 4)[:, None]
+    if bnd.all():
+        return disp
+
+    pairs = cKDTree(x).query_pairs(1.15 * a, output_type="ndarray")
+    adj = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(x), len(x))).tocsr()
+    adj = adj + adj.T
+    lap = diags(np.asarray(adj.sum(axis=1)).ravel()[~bnd] + 1e-9) - adj[~bnd][:, ~bnd]
+    disp[~bnd] = spsolve(lap.tocsc(), adj[~bnd][:, bnd] @ disp[bnd])
+    return disp
 
 
 def voronoi_from_points(L, rho, points, theta):
@@ -285,11 +381,23 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         self.timings = {}
         t0 = time.perf_counter()
 
+        # Lattice of each grain, basis F R(theta) B0, with F a tiny strain making the mean orientation
+        # commensurate with the periodic box, and origins putting weakly misoriented neighbours in registry
+        a = a_CC * np.sqrt(3)
+        B0 = np.array([[a, a / 2], [0, a * np.sqrt(3) / 2]])
+        R = lambda t: np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+        theta_mean = np.angle(np.sum(self.lattice.areas * np.exp(6j * self.theta))) / 6
+        F = self.L * np.linalg.inv(nearest_lattice_vectors(self.L * np.eye(2), R(theta_mean) @ B0).T)
+        bases = np.array([F @ R(t) @ B0 for t in self.theta])
+        v_owner, v_other, v_segs, v_dtheta = boundary_views(self.points, self.theta, self.all_points, self.vor)
+        origins = lattice_origins(self.points, bases, self.all_points, v_owner, v_other, v_segs, v_dtheta)
+        v_origins = origins[v_other % self.N] + self.all_points[v_other] - self.points[v_other % self.N]
+
         # Generate base Lattice
         mean_grain_radius = 1 / np.sqrt(np.pi * self.lattice.rho)
         patch_L = min(self.L, 6 * mean_grain_radius)
         base_lattice = generate_triangular_lattice(patch_L, a_CC)
-        all_generators = []
+        all_generators, across = [], []
 
         owner_tree = cKDTree(self.all_points)
 
@@ -301,7 +409,7 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
             if -1 in vertices or len(vertices) == 0:
                 continue
 
-            polygon = Polygon(self.vor.vertices[vertices]).buffer(0.05)
+            polygon = Polygon(self.vor.vertices[vertices]).buffer(a)
 
             min_x, min_y, max_x, max_y = polygon.bounds
             if (max_x < 0 or min_x > self.L or max_y < 0 or min_y > self.L):
@@ -313,24 +421,33 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
             else:
                 src = base_lattice
 
-            theta = self.theta[grain % self.N]
-            center = self.all_points[grain]
+            i = grain % self.N
+            shift = self.all_points[grain] - self.points[i]
 
-            rot_atoms = rotate_and_move_atoms(src, theta, center)
+            rot_atoms = rotate_and_move_atoms(src, self.theta[i], np.zeros(2)) @ F.T + origins[i] + shift
 
             mask = (rot_atoms[:, 0] >= min_x) & (rot_atoms[:, 0] <= max_x) & (rot_atoms[:, 1] >= min_y) & (rot_atoms[:, 1] <= max_y)
 
             rot_atoms = rot_atoms[mask]
+            rot_atoms = rot_atoms[contains_xy(polygon, rot_atoms[:, 0], rot_atoms[:, 1])]
 
+            v = v_owner == i
+            rot_atoms = rot_atoms + blend_displacement(rot_atoms, v_segs[v] + shift, v_origins[v] + shift,
+                                                       bases[v_other[v] % self.N], v_dtheta[v], a)
             _, owner = owner_tree.query(rot_atoms)
-            inside = owner == grain
-            all_generators.append(rot_atoms[inside])
+            all_generators.append(rot_atoms)
+            across.append(owner != grain)
 
         generators = np.vstack(all_generators)
 
         # Keep only generators that are within the box, wrapped into [0, L)
         mask = (generators[:, 0] >= 0) & (generators[:, 0] <= self.L) & (generators[:, 1] >= 0) & (generators[:, 1] <= self.L)
         generators = np.mod(generators[mask], self.L)
+
+        # Points beyond the boundary of their grain are kept only if they merged with a point of the neighbour
+        across = np.concatenate(across)[mask]
+        merged = cKDTree(generators, boxsize=self.L).query_pairs(0.5, output_type='ndarray').ravel()
+        generators = generators[~across | np.isin(np.arange(len(generators)), merged)]
 
         # Periodic removal: also removes the duplicates across the box edges
         generators = self.remove_close_generators(generators)

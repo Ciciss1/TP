@@ -9,7 +9,7 @@ RUSLAN_DIR = Path("/scratch/escarmel/crystal_big_grains/")
 FOLDERS = ["eps=0/L=565.7/rho=0.00015626"]
 K_INDEX = 1
 
-OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results_big_grains/")
+OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results_rho_0.00015626")
 
 T_KELVIN = 300
 EQUIL_CHECK_PS = 2.0
