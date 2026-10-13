@@ -149,7 +149,7 @@ class _LocalCVT:
         return np.hypot(Sx[:self.n_free] / A, Sy[:self.n_free] / A), A
 
 
-def relaxation_CPU(L, generators, boundary_mask, n_iter=1000, tol=1e-2, step_size=0.99, method="lbfgs"):
+def relaxation_CPU(L, generators, boundary_mask, n_iter=1000, tol=1e-2, step_size=0.99, method="lbfgs", n_lloyd_pre=10):
     '''
     Relax the free generators towards a centroidal Voronoi tessellation
     Inputs:
@@ -160,6 +160,7 @@ def relaxation_CPU(L, generators, boundary_mask, n_iter=1000, tol=1e-2, step_siz
         tol : convergence threshold on max |g_i - c_i| (AA), the Lloyd displacement
         step_size : Lloyd step (method="lloyd" only)
         method : "lbfgs" (L-BFGS on the CVT energy, Liu et al. 2009) or "lloyd"
+        n_lloyd_pre : plain Lloyd steps before each L-BFGS attempt (lbfgs only)
     Outputs:
         relaxed_generators : coordinates of the relaxed generators
         info : number of energy evaluations and final max |g - c|
@@ -175,10 +176,18 @@ def relaxation_CPU(L, generators, boundary_mask, n_iter=1000, tol=1e-2, step_siz
         res0, A0 = cvt.residual(x)
         # |dF/dg_i| = 2 m_i |g_i - c_i|  ->  gradient tolerance equivalent to tol
         gtol = 2.0 * float(np.median(A0)) * tol
-        res = minimize(cvt.energy_and_grad, x, jac=True, method="L-BFGS-B",
-                       options=dict(maxiter=n_iter, gtol=gtol, ftol=0.0, maxcor=20))
-        x = res.x
-        n_it = int(res.nit)
+        n_it = 0
+        for attempt in range(5):
+            for _ in range(n_lloyd_pre):
+                A, Sx, Sy, _ = cvt.moments(x)
+                A = np.maximum(A[:cvt.n_free], 1e-12)
+                x = (x.reshape(-1, 2) + step_size * np.column_stack([Sx[:cvt.n_free] / A, Sy[:cvt.n_free] / A])).ravel()
+            res = minimize(cvt.energy_and_grad, x, jac=True, method="L-BFGS-B",
+                           options=dict(maxiter=n_iter, gtol=gtol, ftol=0.0, maxcor=20))
+            x = res.x
+            n_it += int(res.nit) + n_lloyd_pre
+            if cvt.residual(x)[0].max() < 2 * tol:
+                break
     elif method == "lloyd":
         n_it = 0
         for n_it in range(1, n_iter + 1):
