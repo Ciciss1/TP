@@ -111,21 +111,6 @@ def metropolis_sweep(theta, adj_i, adj_j, adj_length, areas, beta, delta_theta, 
             accepts += 1
     return attempts, accepts
 
-def adapt_delta(delta_theta, acceptance_rate, target_rate=0.5, adaptation_factor=1.05, min_delta=1e-3, max_delta=PI/6):
-    '''
-    Adapt the delta_theta to achieve the target acceptance rate
-    Inputs:
-        delta_theta : current delta_theta
-        acceptance_rate : current acceptance rate
-        target_rate : desired acceptance rate
-        adaptation_factor : factor by which to increase/decrease delta_theta
-    '''
-    if acceptance_rate < target_rate - 0.05:
-        delta_theta = max(delta_theta / adaptation_factor, min_delta)
-    elif acceptance_rate > target_rate + 0.05:
-        delta_theta = min(delta_theta * adaptation_factor, max_delta)
-    return delta_theta
-
 def estimate_tau_int(obs, c=5.0, max_lag=None, max_iter=20):
     """
     Estimate the integrated autocorrelation time of a time series using the FFT method.

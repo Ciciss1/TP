@@ -1,285 +1,151 @@
 """
-Validation des cristaux de graphene polycristallin (.npz produits par Run_Simulation.py).
+Sanity checks of the crystals of a folder (T=<T>K_k=<k>.npz written by Run_Simulation.py):
+atom count, LAMMPS convergence, bond lengths, overlaps, corrugation, rings and Euler check.
 
-Usage :
-    python validate_crystals.py /scratch/escarmel/crystals/eps=0/L=272.12/rho=0.00135
-    python validate_crystals.py <dossier> --energy --lmp /home/escarmel/opt/lammps/bin/lmp --airebo CH.airebo
+Usage:
+    python validate_crystals.py <folder> [--energy --lmp ~/opt/lammps/bin/lmp --airebo CH.airebo]
 
-Sortie : tableau par temperature (trie par T), validation.csv, validation.png.
---energy relance un point unique AIREBO (run 0) pour obtenir E/atome et la contrainte dans le plan.
+Output: table sorted by T, validation.csv and validation.png in the folder. --energy adds a single
+AIREBO evaluation (E/atom and in-plane stress) of each crystal.
 """
 import argparse
-import glob
+import csv
 import os
 import re
 import subprocess
 import tempfile
+from pathlib import Path
 
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
 
 A_CC = 1.3967512290507305
-Z_VACUUM = 10.0
-EV_A2_TO_N_M = 16.0218
-BAR_TO_EV_A3 = 6.24151e-7
+Z_BOX = 10.0
+FNAME = re.compile(r"T=(\d+)K_k=(\d+)\.npz$")
 
 
-def min_image(d, L):
-    return d - L * np.round(d / L)
+def min_image(d, Lx, Ly):
+    return d - np.array([Lx, Ly]) * np.round(d / [Lx, Ly])
 
 
-def scalar(data, key, default=np.nan):
-    if key not in data.files:
-        return default
-    v = np.asarray(data[key])
-    return v.item() if v.size == 1 else v
-
-
-def build_neighbors(bonds, N):
-    src = np.concatenate([bonds[:, 0], bonds[:, 1]])
-    dst = np.concatenate([bonds[:, 1], bonds[:, 0]])
-    deg = np.bincount(src, minlength=N)
-    if not np.all(deg == 3):
-        return None, deg
-    order = np.argsort(src, kind="stable")
-    return dst[order].reshape(N, 3), deg
-
-
-def ring_statistics(atoms, bonds, L):
+def ring_sizes(xy, bonds, Lx, Ly):
     '''
-    Trace the faces of the (toroidal) bond graph. Returns ring-size histogram and Euler check
-    (sum of (6 - n) over faces must be 0 on a torus for a trivalent graph).
+    Faces of the bond graph (neighbours sorted counter-clockwise, every atom has 3 bonds)
     '''
-    N = len(atoms)
-    nb, deg = build_neighbors(bonds, N)
-    if nb is None:
-        return None
-    d = min_image(atoms[nb, :2] - atoms[:, None, :2], L)
-    ang = np.arctan2(d[..., 1], d[..., 0])
-    order = np.argsort(ang, axis=1)
-    ns = np.take_along_axis(nb, order, axis=1).tolist()
-
-    visited = set()
-    sizes = []
+    N = len(xy)
+    src, dst = np.r_[bonds[:, 0], bonds[:, 1]], np.r_[bonds[:, 1], bonds[:, 0]]
+    d = min_image(xy[dst] - xy[src], Lx, Ly)
+    nb = dst[np.lexsort((np.arctan2(d[:, 1], d[:, 0]), src))].reshape(N, 3).tolist()
+    visited, sizes = set(), []
     for u0 in range(N):
-        for v0 in ns[u0]:
-            if (u0, v0) in visited:
-                continue
+        for v0 in nb[u0]:
             u, v, n = u0, v0, 0
             while (u, v) not in visited:
                 visited.add((u, v))
                 n += 1
-                idx = ns[v].index(u)
-                w = ns[v][(idx - 1) % 3]
-                u, v = v, w
-                if n > 10000:
-                    break
-            sizes.append(n)
-    sizes = np.array(sizes)
-    hist = {k: int(np.sum(sizes == k)) for k in (5, 6, 7)}
-    hist["other"] = int(np.sum((sizes != 5) & (sizes != 6) & (sizes != 7)))
-    hist["euler"] = int(np.sum(6 - sizes))
-    hist["n_faces"] = int(len(sizes))
-    return hist
+                u, v = v, nb[v][(nb[v].index(u) - 1) % 3]
+            if n:
+                sizes.append(n)
+    return np.array(sizes)
 
 
-def lammps_single_point(atoms, L, lmp, airebo):
-    '''E/atom (eV) and in-plane stress (N/m) with full AIREBO, run 0.'''
-    N = len(atoms)
-    pos = atoms.copy()
-    pos[:, 0] = np.mod(pos[:, 0], L)
-    pos[:, 1] = np.mod(pos[:, 1], L)
-    with tempfile.TemporaryDirectory(prefix="validate_") as tmp:
-        data = os.path.join(tmp, "in.data")
-        inp = os.path.join(tmp, "in.lmp")
+def single_point(xyz, Lx, Ly, lmp, airebo):
+    '''
+    E/atom (eV) and in-plane stresses (N/m) with full AIREBO, run 0
+    '''
+    N = len(xyz)
+    with tempfile.TemporaryDirectory() as tmp:
+        data, inp = os.path.join(tmp, "in.data"), os.path.join(tmp, "in.lmp")
         with open(data, "w") as f:
-            f.write("check\n\n")
-            f.write(f"{N} atoms\n1 atom types\n\n")
-            f.write(f"0 {L:.6f} xlo xhi\n0 {L:.6f} ylo yhi\n-{Z_VACUUM} {Z_VACUUM} zlo zhi\n\n")
-            f.write("Masses\n\n1 12.011\n\nAtoms\n\n")
-            tab = np.column_stack([np.arange(1, N + 1), np.ones(N), pos])
-            np.savetxt(f, tab, fmt="%d %d %.8f %.8f %.8f")
+            f.write(f"check\n\n{N} atoms\n1 atom types\n\n0 {Lx:.6f} xlo xhi\n0 {Ly:.6f} ylo yhi\n-{Z_BOX} {Z_BOX} zlo zhi\n\n"
+                    "Masses\n\n1 12.011\n\nAtoms\n\n")
+            np.savetxt(f, np.column_stack([np.arange(1, N + 1), np.ones(N), xyz]), fmt="%d %d %.8f %.8f %.8f")
         with open(inp, "w") as f:
-            f.write(f"""units metal
-atom_style atomic
-boundary p p p
-read_data {data}
-pair_style airebo 3.0 1 1
-pair_coeff * * {os.path.abspath(airebo)} C
-variable pe equal pe
-variable pxx equal pxx
-variable pyy equal pyy
-variable pxy equal pxy
-thermo_style custom step pe pxx pyy pxy
-run 0
-print "RESULT ${{pe}} ${{pxx}} ${{pyy}} ${{pxy}}"
-""")
-        r = subprocess.run([lmp, "-in", inp, "-log", "none"], capture_output=True, text=True)
-        m = re.search(r"RESULT\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)", r.stdout)
-        if not m:
-            return dict(E_per_atom=np.nan, sxx=np.nan, syy=np.nan, sxy=np.nan)
-        pe, pxx, pyy, pxy = map(float, m.groups())
-        conv = -2 * Z_VACUUM * BAR_TO_EV_A3 * EV_A2_TO_N_M       # pressure (bar) -> 2D stress (N/m)
-        return dict(E_per_atom=pe / N, sxx=pxx * conv, syy=pyy * conv, sxy=pxy * conv)
+            f.write(f"units metal\natom_style atomic\nboundary p p p\nread_data {data}\n"
+                    f"pair_style airebo 3.0 1 1\npair_coeff * * {os.path.abspath(airebo)} C\n"
+                    "thermo_style custom pe pxx pyy pxy\nrun 0\nprint \"RESULT $(pe) $(pxx) $(pyy) $(pxy)\"\n")
+        m = re.search(r"RESULT\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)", subprocess.run([lmp, "-in", inp, "-log", "none"], capture_output=True, text=True).stdout)
+    if not m:
+        return dict(E_per_atom=np.nan, sxx=np.nan, syy=np.nan, sxy=np.nan)
+    pe, pxx, pyy, pxy = map(float, m.groups())
+    conv = -2 * Z_BOX * 6.24151e-7 * 16.0218                     # pressure (bar) -> 2D stress (N/m)
+    return dict(E_per_atom=pe / N, sxx=pxx * conv, syy=pyy * conv, sxy=pxy * conv)
 
 
 def analyse(path, args):
-    data = np.load(path)
-    atoms = np.asarray(data["atoms"], dtype=np.float64)
-    bonds = np.asarray(data["bonds"], dtype=np.int64)
-    L = float(data["L"][0])
-    N = len(atoms)
-    xy = np.mod(atoms[:, :2], L)
-    xy[xy >= L] = 0.0
-    z = atoms[:, 2]
+    d = np.load(path)
+    xyz, bonds = d["atoms"], d["bonds"]
+    Lx, Ly = (float(v) for v in d["lattice"])
+    N = len(xyz)
+    get = lambda key: d[key].item() if key in d.files else np.nan
 
-    out = {"file": os.path.basename(path)}
-    out["T_K"] = scalar(data, "meta_T_K")
-    out["N"] = N
-    ideal = L * L / (3 * np.sqrt(3) / 4 * A_CC**2)
-    out["N_excess_%"] = 100 * (N / ideal - 1)
+    crit = d["lammps_criterion"] if "lammps_criterion" in d.files else []
+    b = np.c_[min_image(xyz[bonds[:, 1], :2] - xyz[bonds[:, 0], :2], Lx, Ly), xyz[bonds[:, 1], 2] - xyz[bonds[:, 0], 2]]
+    r = np.linalg.norm(b, axis=1)
 
-    # MC
-    out["mc_converged"] = bool(scalar(data, "meta_mc_converged", False))
-    out["mc_sweeps"] = scalar(data, "meta_mc_sweeps")
-    out["mc_energy"] = scalar(data, "meta_mc_energy")
-    out["mc_misor"] = scalar(data, "meta_mc_misorientation")
+    xy = np.mod(xyz[:, :2], [Lx, Ly])
+    xy[xy >= [Lx, Ly]] = 0.0
+    pairs = cKDTree(xy, boxsize=[Lx, Ly]).query_pairs(2.0, output_type="ndarray")
+    dp = np.linalg.norm(np.c_[min_image(xy[pairs[:, 0]] - xy[pairs[:, 1]], Lx, Ly), xyz[pairs[:, 0], 2] - xyz[pairs[:, 1], 2]], axis=1)
+    bonded = set((np.minimum(*bonds.T) * N + np.maximum(*bonds.T)).tolist())
+    nonbonded = np.array([x not in bonded for x in (np.minimum(*pairs.T) * N + np.maximum(*pairs.T)).tolist()], dtype=bool)
 
-    # LAMMPS convergence
-    crit = data["lammps_criterion"] if "lammps_criterion" in data.files else np.array([])
-    out["lmp_ok"] = bool(len(crit) == 2 and all("force tolerance" in str(c) for c in crit))
-    fn = data["lammps_fnorm_final"] if "lammps_fnorm_final" in data.files else np.array([np.nan])
-    out["fnorm_final"] = float(np.atleast_1d(fn)[-1])
-
-    # Bond lengths (topological bonds, 3D, after relaxation)
-    dxy = min_image(atoms[bonds[:, 0], :2] - atoms[bonds[:, 1], :2], L)
-    dz = z[bonds[:, 0]] - z[bonds[:, 1]]
-    r = np.sqrt((dxy**2).sum(1) + dz**2)
-    out["bond_min"], out["bond_max"] = r.min(), r.max()
-    out["bond_mean"], out["bond_std"] = r.mean(), r.std()
-    out["frac_bond_gt_1.85"] = float(np.mean(r > 1.85))
-
-    # All-pairs geometry
-    tree = cKDTree(xy, boxsize=L)
-    pairs = tree.query_pairs(2.0, output_type="ndarray")
-    dxy = min_image(atoms[pairs[:, 0], :2] - atoms[pairs[:, 1], :2], L)
-    dz = z[pairs[:, 0]] - z[pairs[:, 1]]
-    dp = np.sqrt((dxy**2).sum(1) + dz**2)
-    out["pair_min"] = dp.min() if len(dp) else np.nan
-    out["n_pairs_lt_1.0"] = int(np.sum(dp < 1.0))
-    geo = pairs[dp < 1.85]
-    coord = np.bincount(geo.ravel(), minlength=N)
-    out["frac_coord3_geo"] = float(np.mean(coord == 3))
-    out["frac_coord_not3_geo"] = float(np.mean(coord != 3))
-    bset = set((np.minimum(bonds[:, 0], bonds[:, 1]) * N + np.maximum(bonds[:, 0], bonds[:, 1])).tolist())
-    gset = set((np.minimum(geo[:, 0], geo[:, 1]) * N + np.maximum(geo[:, 0], geo[:, 1])).tolist())
-    out["bonds_topo_not_geo"] = len(bset - gset)
-    out["bonds_geo_not_topo"] = len(gset - bset)
-
-    # Roughness
-    out["z_rms"] = float(np.std(z))
-    out["z_ptp"] = float(np.ptp(z))
-
-    # Rings
-    rings = ring_statistics(atoms, bonds, L)
-    if rings is not None:
-        nf = rings["n_faces"]
-        out["ring5_%"] = 100 * rings[5] / nf
-        out["ring6_%"] = 100 * rings[6] / nf
-        out["ring7_%"] = 100 * rings[7] / nf
-        out["ring_other_%"] = 100 * rings["other"] / nf
-        out["euler_check"] = rings["euler"]
-    else:
-        out["euler_check"] = np.nan
-
+    sizes = ring_sizes(xyz[:, :2], bonds, Lx, Ly)
+    out = dict(file=path.name, T_K=get("meta_T_K"), N=N,
+               N_excess_pct=100 * (N / (Lx * Ly / (3 * np.sqrt(3) / 4 * A_CC ** 2)) - 1),
+               mc_converged=bool(get("meta_mc_converged") == 1), mc_energy=get("meta_mc_energy"),
+               mc_misor=get("meta_mc_misorientation"),
+               lmp_ok=bool(len(crit) and "force tolerance" in str(crit[-1])),
+               bond_min=r.min(), bond_max=r.max(), bond_mean=r.mean(), bond_std=r.std(), n_bond_gt_1_7=int(np.sum(r > 1.7)),
+               nonbonded_min=dp[nonbonded].min() if nonbonded.any() else np.nan,
+               z_rms=xyz[:, 2].std(), z_ptp=np.ptp(xyz[:, 2]),
+               ring5_pct=100 * np.mean(sizes == 5), ring7_pct=100 * np.mean(sizes == 7),
+               ring_other_pct=100 * np.mean((sizes < 5) | (sizes > 7)), euler=int(np.sum(6 - sizes)))
     if args.energy:
-        out.update(lammps_single_point(atoms, L, args.lmp, args.airebo))
+        out.update(single_point(xyz, Lx, Ly, args.lmp, args.airebo))
+    flags = [name for name, bad in (("LAMMPS", not out["lmp_ok"]), ("overlap", out["nonbonded_min"] < 1.8),
+                                    ("bond", out["bond_max"] > 1.85), ("euler", out["euler"] != 0),
+                                    ("N", abs(out["N_excess_pct"]) > 2)) if bad]
+    out["flags"] = ",".join(flags) or "ok"
     return out
 
 
-def flags(row):
-    f = []
-    if not row["lmp_ok"]:
-        f.append("LAMMPS")
-    if row["n_pairs_lt_1.0"] > 0 or row["pair_min"] < 1.0:
-        f.append("overlap")
-    if row["frac_coord_not3_geo"] > 0.02:
-        f.append("coord")
-    if row["z_rms"] > 1.0:
-        f.append("buckling")
-    if row["euler_check"] not in (0,) and not np.isnan(row["euler_check"]):
-        f.append("euler")
-    if abs(row["N_excess_%"]) > 2:
-        f.append("N")
-    return ",".join(f) if f else "ok"
-
-
-def main():
+if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("folder")
     ap.add_argument("--energy", action="store_true")
     ap.add_argument("--lmp", default="lmp")
     ap.add_argument("--airebo", default="CH.airebo")
-    ap.add_argument("--csv", default="validation.csv")
-    ap.add_argument("--plot", default="validation.png")
     args = ap.parse_args()
+    folder = Path(args.folder)
 
-    files = sorted(glob.glob(os.path.join(args.folder, "T=*K_k=*.npz")))
-    if not files:
-        raise SystemExit("Aucun .npz trouve")
-    rows = []
-    for p in files:
-        try:
-            rows.append(analyse(p, args))
-        except Exception as e:
-            print(f"ECHEC {p}: {type(e).__name__}: {e}")
-    rows.sort(key=lambda r: (r["T_K"], r["file"]))
+    files = sorted((p for p in folder.glob("T=*K_k=*.npz") if FNAME.search(p.name)),
+                   key=lambda p: tuple(map(int, FNAME.search(p.name).groups())))
+    rows = [analyse(p, args) for p in files]
+    if not rows:
+        raise SystemExit(f"No T=*K_k=*.npz crystal in {folder}")
+
+    cols = ["T_K", "N", "N_excess_pct", "mc_misor", "lmp_ok", "bond_min", "bond_max", "n_bond_gt_1_7", "nonbonded_min",
+            "z_rms", "ring5_pct", "ring7_pct", "euler"] + (["E_per_atom", "sxx", "syy"] if args.energy else []) + ["flags"]
+    print("  ".join(f"{c:>13s}" for c in cols))
     for r in rows:
-        r["flags"] = flags(r)
+        print("  ".join(f"{r[c]:>13.5g}" if isinstance(r[c], (float, np.floating)) else f"{str(r[c]):>13s}" for c in cols))
 
-    cols = ["T_K", "N", "N_excess_%", "mc_sweeps", "mc_energy", "mc_misor", "lmp_ok", "bond_min", "bond_max",
-            "pair_min", "frac_coord_not3_geo", "bonds_topo_not_geo", "z_rms", "ring5_%", "ring7_%", "euler_check"]
-    if args.energy:
-        cols += ["E_per_atom", "sxx", "syy", "sxy"]
-    cols += ["flags"]
-
-    print("  ".join(f"{c:>12s}" for c in cols))
-    for r in rows:
-        cells = []
-        for c in cols:
-            v = r.get(c, "")
-            cells.append(f"{v:>12.4g}" if isinstance(v, (float, np.floating)) else f"{str(v):>12s}")
-        print("  ".join(cells))
-
-    import csv
-    keys = sorted({k for r in rows for k in r})
-    with open(args.csv, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=keys)
+    with open(folder / "validation.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
-    print(f"\nCSV -> {args.csv}")
 
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    T = np.array([r["T_K"] for r in rows])
-    panels = [("mc_energy", "E MC moyenne (eV)"), ("mc_misor", "desorientation moyenne"),
-              ("N_excess_%", "exces d'atomes (%)"), ("z_rms", "z rms (A)"),
-              ("ring5_%", "anneaux 5 (%)"), ("ring7_%", "anneaux 7 (%)")]
-    if args.energy:
-        panels += [("E_per_atom", "E/atome (eV)"), ("sxx", "sigma_xx (N/m)")]
-    n = len(panels)
-    fig, axs = plt.subplots((n + 2) // 3, 3, figsize=(12, 3.2 * ((n + 2) // 3)))
-    for ax, (k, lab) in zip(axs.ravel(), panels):
-        ax.plot(T, [r.get(k, np.nan) for r in rows], "o-", ms=3)
-        ax.set_xlabel("T (K)")
-        ax.set_ylabel(lab)
-    for ax in axs.ravel()[n:]:
+    panels = [("mc_misor", "MC misorientation"), ("N_excess_pct", "excess atoms (%)"), ("z_rms", r"z RMS ($\mathrm{\AA}$)"),
+              ("ring5_pct", "5-rings (%)"), ("bond_max", r"longest bond ($\mathrm{\AA}$)"), ("nonbonded_min", r"closest non-bonded pair ($\mathrm{\AA}$)")]
+    panels += [("E_per_atom", "E/atom (eV)"), ("sxx", r"$\sigma_{xx}$ (N/m)")] if args.energy else []
+    fig, axes = plt.subplots((len(panels) + 2) // 3, 3, figsize=(12, 3.2 * ((len(panels) + 2) // 3)))
+    T = [r["T_K"] for r in rows]
+    for ax, (key, label) in zip(axes.ravel(), panels):
+        ax.plot(T, [r[key] for r in rows], "o", ms=3)
+        ax.set(xlabel="T (K)", ylabel=label)
+    for ax in axes.ravel()[len(panels):]:
         ax.axis("off")
-    plt.tight_layout()
-    plt.savefig(args.plot, dpi=150)
-    print(f"Figure -> {args.plot}")
-
-
-if __name__ == "__main__":
-    main()
+    fig.tight_layout()
+    fig.savefig(folder / "validation.png", dpi=150)

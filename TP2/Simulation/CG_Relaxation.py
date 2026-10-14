@@ -8,8 +8,6 @@ from scipy.spatial import cKDTree
 N_THREADS = 2
 Z_VACUUM = 30.0
 C_MASS = 12.011
-
-C_MASS = 12.011
 BAR_TO_N_M = 1e-5
 
 # Stage 1 (planar, only atoms near the grain boundaries move)

@@ -1,221 +1,75 @@
 """
-Run separe, meme squelette que LDOS_map.py / Raman_map.py : teste si la
-LDOS tight-binding (KPM) distingue les dislocations liees (paire 5-7,
-attendu hexatique/ordonne) des disclinaisons libres (attendu liquide/
-desordonne) -- plutot que la simple presence d'un defaut (GB vs bulk,
-teste par LDOS_map.py, qui melange les deux regimes a tout T).
-
-Reutilise classify_dislocations / defect_type_atom_masks (deja dans
-Properties.py, section anneaux -- meme graphe nb_sorted/deg que
-Raman_map.py et LDOS_map.py, pas de nouveau calcul geometrique) et
-Properties.ldos_paired_vs_free pour la partie KPM.
-
-A T tres bas, il peut y avoir tres peu (voire aucune) disclinaison
-libre -- les fichiers ou une des deux classes est vide sont ignores
-(voir "skip" dans les logs), pas une erreur.
+Tight-binding LDOS (KPM, GPU when available) near the Dirac point vs T, for three classes of atoms
+probed in a single run: grains (atoms of hexagons only), bound dislocations (atoms of a 5 or 7 ring
+next to one of the other kind) and free disclinations (atoms of an unpaired 5 or 7 ring).
+Zero-energy weight (|E| < e_window) vs T, and spectra of a few temperatures.
 
 Usage:
-    python LDOS_paired_free_map.py /chemin/vers/dossier [--n-probes 128]
-                                    [--n-moments 512] [--backend torch]
+    python LDOS_map.py <folder> [--n-probes 128] [--n-moments 512] [--e-window 0.15]
 """
-import os
-import re
-import glob
 import argparse
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from Properties import (
-    build_neighbor_array, find_rings_with_atoms_numba, ldos_paired_vs_free,
-)
+import Properties as P
+
+CLASSES = {"grain": "grains", "paired": "dislocations (5-7)", "free": "free disclinations"}
+E_GRID = np.linspace(-1.0, 1.0, 400)
 
 
-FNAME_RE = re.compile(r"T=(\d+)_k=(\d+)\.npz$")
+def analyze(path, maps, n_probes, n_moments, e_window, seed = 0):
+    xyz, bonds, Lx, Ly = P.load_crystal(path)
+    sizes, ring_atoms = P.rings(xyz, bonds, Lx, Ly)
+    is57, paired, _, _ = P.defect_graph(sizes, *P.ring_pairs(sizes, ring_atoms))
+    N = len(xyz)
+    masks = {"grain": ~P.atoms_of(N, ring_atoms, sizes != 6),
+             "paired": P.atoms_of(N, ring_atoms, is57 & paired),
+             "free": P.atoms_of(N, ring_atoms, is57 & ~paired)}
+
+    rng = np.random.default_rng(seed)
+    probes = {c: rng.choice(np.where(m)[0], min(n_probes, m.sum()), replace=False) for c, m in masks.items()}
+    ldos, weight = P.kpm_ldos(xyz, bonds, Lx, Ly, np.concatenate(list(probes.values())), E_GRID, n_moments, e_window)
+
+    res, start = {}, 0
+    for c, p in probes.items():
+        sl = slice(start, start + len(p))
+        start += len(p)
+        res[f"w_{c}"] = weight[sl].mean() if len(p) else np.nan
+        res[f"n_{c}"] = int(masks[c].sum())
+        if maps:
+            res[f"spectrum_{c}"] = ldos[sl].mean(axis=0) if len(p) else np.full(len(E_GRID), np.nan)
+    return res
 
 
-def _prepare_file(path, a_CC=1.42):
-    """ Partie CPU (chargement + graphe de voisinage + anneaux) -- voir LDOS_map.py. """
-    data = np.load(path)
-    xyz = data['xyz']
-    xy = xyz[:, :2]
-    Lx, Ly = data['lattice']
-    nb_sorted, deg = build_neighbor_array(xy, Lx, Ly, bond_length=a_CC)
-    ring_sizes, ring_atoms, n_excluded = find_rings_with_atoms_numba(nb_sorted, deg)
-    return dict(xyz=xyz, Lx=Lx, Ly=Ly, nb_sorted=nb_sorted, deg=deg,
-                ring_sizes=ring_sizes, ring_atoms=ring_atoms,
-                n_excluded=n_excluded, N=len(xyz))
-
-
-def analyze_prepared_ldos(prep, n_probes_per_class=128, n_moments=512,
-                           e_window=0.15, e_grid=None, backend="torch", seed=0):
-    out = ldos_paired_vs_free(
-        prep["xyz"], prep["nb_sorted"], prep["deg"], prep["Lx"], prep["Ly"],
-        prep["ring_sizes"], prep["ring_atoms"],
-        n_probes_per_class=n_probes_per_class, n_moments=n_moments,
-        e_grid=e_grid, e_window=e_window, seed=seed, backend=backend,
-    )
-    if out is None:
-        return None
-    out["N"] = prep["N"]
-    out["n_excluded"] = prep["n_excluded"]
-    return out
-
-
-def collect_results_ldos_pf(folder, a_CC=1.42, n_probes_per_class=128, n_moments=512,
-                             e_window=0.15, backend="torch", example_k=None, prefetch=True):
-    """ Meme logique que collect_results_ldos (LDOS_map.py), classes paired/free. """
-    files = sorted(glob.glob(f"{folder}/T=*_k=*.npz"))
-    if not files:
-        raise FileNotFoundError(f"Aucun fichier T=*_k=*.npz trouve dans {folder}")
-
-    results = defaultdict(lambda: defaultdict(list))
-    example_spectra = {}
-    e_grid = None
-
-    executor = ThreadPoolExecutor(max_workers=1) if prefetch else None
-    next_future = executor.submit(_prepare_file, files[0], a_CC) if executor else None
-
-    for i, path in enumerate(files):
-        m = FNAME_RE.search(path)
-        if not m:
-            print(f"  (ignore, nom non reconnu) {path}")
-            if executor and i + 1 < len(files):
-                next_future = executor.submit(_prepare_file, files[i + 1], a_CC)
-            continue
-        T, k = int(m.group(1)), int(m.group(2))
-
-        print(f"T={T} k={k} ...", end=" ", flush=True)
-        try:
-            if executor:
-                prep = next_future.result()
-                if i + 1 < len(files):
-                    next_future = executor.submit(_prepare_file, files[i + 1], a_CC)
-            else:
-                prep = _prepare_file(path, a_CC=a_CC)
-
-            res = analyze_prepared_ldos(
-                prep, n_probes_per_class=n_probes_per_class, n_moments=n_moments,
-                e_window=e_window, e_grid=e_grid, backend=backend,
-            )
-        except Exception as e:
-            print(f"ECHEC ({e})")
-            continue
-
-        if res is None:
-            print("skip (classe liee ou libre vide sur ce fichier)")
-            continue
-
-        if e_grid is None:
-            e_grid = res["e_grid"]
-
-        results[T]["paired_zero_E_weight"].append(res["paired_zero_E_weight"])
-        results[T]["free_zero_E_weight"].append(res["free_zero_E_weight"])
-        print(f"OK  paired_w={res['paired_zero_E_weight']:.5f}  free_w={res['free_zero_E_weight']:.5f}  "
-              f"n_paired_atoms={res['n_paired_atoms']}  n_free_atoms={res['n_free_atoms']}  "
-              f"excl={res['n_excluded']}")
-
-        keep = (T not in example_spectra) if example_k is None else (k == example_k)
-        if keep:
-            example_spectra[T] = {**res, "k": k}
-
-    if executor:
-        executor.shutdown(wait=True)
-
-    return dict(results), example_spectra, e_grid
-
-
-def plot_results_vs_T(results, e_window, out_dir=".", out_prefix="ldos_paired_free_vs_T"):
-    """ Trace le poids LDOS a energie nulle (liee vs libre) vs T. """
-    T_values = sorted(results.keys())
-
-    def mean_std(T, key):
-        vals = np.array(results[T][key])
-        return vals.mean(), vals.std()
-
-    fig, ax = plt.subplots(figsize=(6.5, 5))
-
-    for key, color, label in [("paired_zero_E_weight", "tab:purple", "dislocations liees (5-7)"),
-                               ("free_zero_E_weight", "tab:orange", "disclinaisons libres")]:
-        means = [mean_std(T, key)[0] for T in T_values]
-        stds = [mean_std(T, key)[1] for T in T_values]
-        ax.errorbar(T_values, means, yerr=stds, marker='o', capsize=3, color=color, label=label)
-
-    ax.set_xlabel(r"$T$ (K)")
-    ax.set_ylabel(f"LDOS weight, |E|<{e_window} eV")
-    ax.set_title("Zero-energy LDOS weight: liees vs libres, vs T")
-    ax.legend()
-    ax.grid(alpha=0.3)
-
-    plt.tight_layout()
-    png_path = os.path.join(out_dir, f"{out_prefix}.png")
-    pdf_path = os.path.join(out_dir, f"{out_prefix}.pdf")
-    plt.savefig(pdf_path)
-    plt.savefig(png_path, dpi=150)
-    print(f"Figures sauvegardees : {pdf_path} / {png_path}")
-
-
-def save_results_data(results, out_dir=".", out_name="ldos_paired_free_data.npz"):
-    T_values = np.array(sorted(results.keys()))
-    out = {"T": T_values}
-    for key in ["paired_zero_E_weight", "free_zero_E_weight"]:
-        means = np.array([np.mean(results[T][key]) for T in T_values])
-        stds = np.array([np.std(results[T][key]) for T in T_values])
-        out[f"{key}_mean"] = means
-        out[f"{key}_std"] = stds
-    out_path = os.path.join(out_dir, out_name)
-    np.savez(out_path, **out)
-    print(f"Donnees sauvegardees : {out_path}")
-
-
-def save_spectra_plot(example_spectra, e_grid, out_dir=".", out_name="ldos_paired_free_spectra_vs_T.png",
-                       n_show=6):
-    """ Spectres liee (trait plein) vs libre (pointille) pour quelques T representatifs. """
-    T_sorted = sorted(example_spectra.keys())
-    show_T = T_sorted[::max(1, len(T_sorted) // n_show)]
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    cmap = plt.get_cmap('viridis')
-    for i, T in enumerate(show_T):
-        color = cmap(i / max(1, len(show_T) - 1))
-        res = example_spectra[T]
-        ax.plot(e_grid, res["paired_spectrum"], color=color, ls='-', label=f"T={T} (liee)")
-        ax.plot(e_grid, res["free_spectrum"], color=color, ls='--', alpha=0.6)
-
-    ax.set_xlabel("E (eV)")
-    ax.set_ylabel("LDOS (a.u.)")
-    ax.set_title("Dislocation liee (plein) vs disclinaison libre (pointille) LDOS spectra")
-    ax.legend(fontsize=7)
-    ax.grid(alpha=0.3)
-
-    plt.tight_layout()
-    out_path = os.path.join(out_dir, out_name)
-    plt.savefig(out_path, dpi=150)
-    print(f"Spectres sauvegardes : {out_path}")
+def plot_spectra(results, path, n_show = 6):
+    T = list(results)[::max(1, len(results) // n_show)]
+    fig, axes = plt.subplots(1, len(CLASSES), figsize=(6 * len(CLASSES), 4.5), sharey=True)
+    colors = plt.get_cmap("viridis")(np.linspace(0, 1, len(T)))
+    for ax, (c, label) in zip(axes, CLASSES.items()):
+        for t, col in zip(T, colors):
+            ax.plot(E_GRID, results[t][0][f"spectrum_{c}"], color=col, label=f"T = {t} K")
+        ax.set(xlabel="E (eV)", title=label)
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel("LDOS (1/eV)")
+    axes[0].legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(f"{path}.png", dpi=150)
+    plt.close(fig)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("folder", nargs="?", default=".",
-                         help="Dossier contenant les T=*_k=*.npz")
-    parser.add_argument("--n-probes", type=int, default=128,
-                         help="Nb d'atomes sondes par classe (liee / libre).")
-    parser.add_argument("--n-moments", type=int, default=512,
-                         help="Ordre du developpement de Chebyshev (KPM).")
-    parser.add_argument("--e-window", type=float, default=0.15,
-                         help="Demi-largeur (eV) de la fenetre autour de E=0.")
-    parser.add_argument("--backend", choices=["numpy", "torch"], default="torch")
-    parser.add_argument("--no-prefetch", action="store_true")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("folder")
+    ap.add_argument("--n-probes", type=int, default=128, help="probed atoms per class")
+    ap.add_argument("--n-moments", type=int, default=512, help="Chebyshev moments (energy resolution)")
+    ap.add_argument("--e-window", type=float, default=0.15, help="half-width of the zero-energy window (eV)")
+    args = ap.parse_args()
+    folder = Path(args.folder)
 
-    if not os.path.isdir(args.folder):
-        raise NotADirectoryError(f"{args.folder} n'est pas un dossier valide")
-
-    results, example_spectra, e_grid = collect_results_ldos_pf(
-        args.folder, n_probes_per_class=args.n_probes, n_moments=args.n_moments,
-        e_window=args.e_window, backend=args.backend, prefetch=not args.no_prefetch)
-    plot_results_vs_T(results, args.e_window, out_dir=args.folder)
-    save_results_data(results, out_dir=args.folder)
-    save_spectra_plot(example_spectra, e_grid, out_dir=args.folder)
+    results = P.run_folder(folder, analyze, n_probes=args.n_probes, n_moments=args.n_moments, e_window=args.e_window)
+    P.plot_vs_T(results, [(f"LDOS weight, |E| < {args.e_window} eV", "weight", [(f"w_{c}", l) for c, l in CLASSES.items()])],
+                folder / "ldos_vs_T")
+    P.save_vs_T(results, [f"w_{c}" for c in CLASSES] + [f"n_{c}" for c in CLASSES], folder / "ldos_data.npz")
+    plot_spectra(results, folder / "ldos_spectra")

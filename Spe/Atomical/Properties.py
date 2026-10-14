@@ -1,1776 +1,455 @@
-import numpy as np
+"""
+Structural observables of the relaxed polycrystalline graphene crystals written by
+TP2/Simulation/Run_Simulation.py (files T=<T>K_k=<k>.npz: atoms, bonds, lattice = [Lx, Ly]).
+
+Every atom has exactly three bonds (checked by the construction), so the topology is read from the
+saved bonds instead of being rebuilt from distances.
+"""
+import re
 import warnings
+from pathlib import Path
+from collections import defaultdict
+
+import numpy as np
+import matplotlib.pyplot as plt
 from numba import njit, prange
-from scipy.spatial import cKDTree
 from scipy.ndimage import gaussian_filter
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
-from collections import defaultdict
+from scipy.spatial import cKDTree
 
-def build_neighbor_array(xy, Lx, Ly, bond_length=1.42, tol=0.15, max_deg=8):
-    """
-    Construit un tableau (N, max_deg) de voisins, tries par angle CCW,
-    pad avec -1. Format compatible numba (pas de listes python).
-    """
-    cutoff = bond_length * (1 + tol)
-    tree = cKDTree(xy, boxsize=[Lx, Ly])
-    pairs = np.array(list(tree.query_pairs(cutoff)))
-
-    N = len(xy)
-    counts = np.zeros(N, dtype=np.int64)
-    nb = -np.ones((N, max_deg), dtype=np.int64)
-
-    for i, j in pairs:
-        if counts[i] < max_deg:
-            nb[i, counts[i]] = j
-            counts[i] += 1
-        if counts[j] < max_deg:
-            nb[j, counts[j]] = i
-            counts[j] += 1
-
-    nb_sorted, deg = _sort_neighbors_ccw(xy, nb, counts, Lx, Ly)
-    return nb_sorted, deg
+A_CC = 1.3967512290507305           # AIREBO equilibrium C-C distance (AA)
+FNAME = re.compile(r"T=(\d+)K_k=(\d+)\.npz$")
 
 
-@njit(parallel=True)
-def _sort_neighbors_ccw(xy, nb, counts, Lx, Ly):
-    N = xy.shape[0]
-    max_deg = nb.shape[1]
-    nb_sorted = -np.ones((N, max_deg), dtype=np.int64)
-    for i in prange(N):
-        d = counts[i]
-        if d == 0:
-            continue
-        angles = np.empty(d, dtype=np.float64)
-        for k in range(d):
-            j = nb[i, k]
-            dx = xy[j, 0] - xy[i, 0]
-            dy = xy[j, 1] - xy[i, 1]
-            dx -= Lx * round(dx / Lx)
-            dy -= Ly * round(dy / Ly)
-            angles[k] = np.arctan2(dy, dx)
-        order = np.argsort(angles)
-        for k in range(d):
-            nb_sorted[i, k] = nb[i, order[k]]
-    return nb_sorted, counts
+# ─────────────────────────────── Reading ───────────────────────────────
+
+def crystal_files(folder):
+    '''
+    (T in K, k, path) of the crystals of a folder, sorted by T then k
+    '''
+    files = sorted((int(m.group(1)), int(m.group(2)), p)
+                   for p in Path(folder).glob("T=*K_k=*.npz") if (m := FNAME.search(p.name)))
+    if not files:
+        raise FileNotFoundError(f"No T=*K_k=*.npz crystal in {folder}")
+    return files
 
 
-# Anneaux (face-tracing en numba)
+def load_crystal(path):
+    '''
+    Relaxed positions (N, 3), bonds (Nb, 2) and box size Lx, Ly of a crystal
+    '''
+    d = np.load(path)
+    Lx, Ly = (float(v) for v in d["lattice"])
+    return np.asarray(d["atoms"], dtype=np.float64), np.asarray(d["bonds"], dtype=np.int64), Lx, Ly
 
-@njit
-def find_rings_numba(nb_sorted, deg, max_ring_size=12):
-    N = nb_sorted.shape[0]
-    max_deg = nb_sorted.shape[1]
-    visited = np.zeros((N, max_deg), dtype=np.bool_)
 
-    ring_sizes = np.empty(N * max_deg, dtype=np.int64)
-    n_rings = 0
-    n_excluded = 0
+def min_image(d, Lx, Ly):
+    d = np.array(d, dtype=np.float64)
+    d[..., 0] -= Lx * np.round(d[..., 0] / Lx)
+    d[..., 1] -= Ly * np.round(d[..., 1] / Ly)
+    return d
 
+
+def wrap(xy, Lx, Ly):
+    xy = np.mod(xy, [Lx, Ly])
+    xy[xy[:, 0] >= Lx, 0] = 0.0
+    xy[xy[:, 1] >= Ly, 1] = 0.0
+    return xy
+
+
+def bond_vectors(xyz, bonds, Lx, Ly):
+    '''
+    Vectors i -> j of the bonds (Nb, 3), minimum image in x and y
+    '''
+    return min_image(xyz[bonds[:, 1]] - xyz[bonds[:, 0]], Lx, Ly)
+
+
+# ─────────────────────────────── Rings and topological defects ───────────────────────────────
+
+@njit(cache=True)
+def _trace_faces(nb, max_size):
+    '''
+    Faces of the planar graph (neighbours sorted counter-clockwise): each directed bond belongs to
+    exactly one face, which is followed by always turning to the next neighbour clockwise
+    '''
+    N = nb.shape[0]
+    visited = np.zeros((N, 3), dtype=np.bool_)
+    sizes = np.empty(N, dtype=np.int64)
+    atoms = -np.ones((N, max_size), dtype=np.int64)
+    n = 0
     for i in range(N):
-        for si in range(deg[i]):
-            if visited[i, si]:
+        for s in range(3):
+            if visited[i, s]:
                 continue
-            j = nb_sorted[i, si]
-            start_i, start_j = i, j
-            cur_a, cur_b, cur_slot = i, j, si
-            length = 0
-            broken = False
-
-            while True:
-                visited[cur_a, cur_slot] = True
+            a, slot, length = i, s, 0
+            while not visited[a, slot]:
+                visited[a, slot] = True
+                if length < max_size:
+                    atoms[n, length] = a
                 length += 1
-
-                idx = -1
-                for k in range(deg[cur_b]):
-                    if nb_sorted[cur_b, k] == cur_a:
-                        idx = k
-                        break
-                if idx == -1:
-                    broken = True
-                    break
-
-                next_slot = (idx - 1) % deg[cur_b]
-                c = nb_sorted[cur_b, next_slot]
-
-                if cur_b == start_i and c == start_j:
-                    break
-
-                cur_a, cur_b, cur_slot = cur_b, c, next_slot
-
-                if length > max_ring_size:
-                    broken = True
-                    break
-
-            if broken:
-                n_excluded += 1
-            else:
-                ring_sizes[n_rings] = length
-                n_rings += 1
-
-    return ring_sizes[:n_rings], n_excluded
+                b = nb[a, slot]
+                k = 0
+                while nb[b, k] != a:
+                    k += 1
+                a, slot = b, (k + 2) % 3
+            sizes[n] = length
+            n += 1
+    return sizes[:n], atoms[:n]
 
 
-def ring_size_distribution(ring_sizes):
-    sizes, counts = np.unique(ring_sizes, return_counts=True)
-    total = counts.sum()
-    return {int(s): 100.0 * c / total for s, c in zip(sizes, counts)}
-
-
-# Sous-reseau A/B (BFS, rapide meme en python pour ce cout)
-
-def assign_sublattice(nb_sorted, deg):
-    N = nb_sorted.shape[0]
-    label = np.full(N, -1, dtype=np.int64)
-    for start in range(N):
-        if label[start] != -1 or deg[start] == 0:
-            continue
-        label[start] = 0
-        queue = [start]
-        head = 0
-        while head < len(queue):
-            i = queue[head]; head += 1
-            for k in range(deg[i]):
-                j = nb_sorted[i, k]
-                if label[j] == -1:
-                    label[j] = 1 - label[i]
-                    queue.append(j)
-    return label
-
-
-# S(q) : elargissement du 1er pic (numba, sommation directe)
-
-def first_peak_qmag(a_CC=1.42):
-    return 4 * np.pi / (3 * a_CC)
-
-@njit(parallel=True)
-def structure_factor_ring(xy, qmag, n_theta=720):
-    N = xy.shape[0]
-    theta = np.arange(n_theta) * (2 * np.pi / n_theta)
-    Sq = np.zeros(n_theta)
-    for t in prange(n_theta):
-        qx = qmag * np.cos(theta[t])
-        qy = qmag * np.sin(theta[t])
-        re = 0.0
-        im = 0.0
-        for i in range(N):
-            phase = qx * xy[i, 0] + qy * xy[i, 1]
-            re += np.cos(phase)
-            im += np.sin(phase)
-        Sq[t] = (re * re + im * im) / N
-    return theta, Sq
-
-def m6_from_profile(theta, Sq):
-    m6 = np.sum(Sq * np.exp(1j * 6 * theta)) / np.sum(Sq)
-    return m6
-
-
-# Visualisation du profil de diffraction
-
-def plot_Sq_profile(theta, Sq, title="", save_path=None, q_values=None, Sq_radial=None):
-    """
-    Trace le profil de S(q) le long du cercle : vue polaire (comme une
-    image de diffraction) + vue lineaire (angle vs intensite, pour
-    quantifier la largeur des pics).
-    """
-    import matplotlib.pyplot as plt
-
-    n_panels = 3 if q_values is not None else 2
-
-    fig = plt.figure(figsize=(5.5 * n_panels, 5))
-
-    # --- vue polaire (comme une figure de diffraction) ---
-    ax1 = fig.add_subplot(1, n_panels, 1, projection='polar')
-    ax1.plot(theta, Sq, color='black', lw=1)
-    ax1.fill(theta, Sq, alpha=0.3)
-    ax1.set_title(f"S(q) along the first peak\n{title}")
-    ax1.set_yticklabels([])
-
-    # --- vue lineaire (plus facile a lire quantitativement) ---
-    ax2 = fig.add_subplot(1, n_panels, 2)
-    ax2.plot(np.degrees(theta), Sq, color='tab:blue')
-    ax2.set_xlabel("angle (deg)")
-    ax2.set_ylabel("S(q)")
-    ax2.set_title("Angular profile of S(q)")
-    ax2.grid(alpha=0.3)
-
-    # --- coupe radiale ---
-    if q_values is not None:
-        ax3 = fig.add_subplot(1, n_panels, 3)
-        ax3.plot(q_values, Sq_radial, color='tab:red')
-        ax3.set_xlabel(r"$|q|$ ($\AA^{-1}$)")
-        ax3.set_ylabel("S(q)")
-        ax3.set_title("Radial profile of S(q)")
-        ax3.grid(alpha=0.3)
-
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
-
-# 6) Elargissement RADIAL du premier pic (ordre translationnel)
-
-@njit(parallel=True)
-def structure_factor_radial(xy, q_angle, q_values):
-    """
-    S(q) le long d'une ligne radiale a angle fixe (celui du pic),
-    en balayant |q|. Mesure l'elargissement RADIAL (ordre translationnel),
-    complementaire de structure_factor_ring (elargissement azimutal).
-    Inputs:
-        xy : (N,2) positions (sous-reseau A recommande)
-        q_angle : angle (rad) de la direction du pic (ex: angle de G_base)
-        q_values : array de normes |q| a scanner
+def rings(xyz, bonds, Lx, Ly, max_size = 12):
+    '''
+    Rings of the crystal
     Outputs:
-        Sq : intensite a chaque q_values
-    """
-    N = xy.shape[0]
-    n_q = len(q_values)
-    Sq = np.zeros(n_q)
-    cos_a = np.cos(q_angle)
-    sin_a = np.sin(q_angle)
-    for t in prange(n_q):
-        qx = q_values[t] * cos_a
-        qy = q_values[t] * sin_a
-        re = 0.0
-        im = 0.0
-        for i in range(N):
-            phase = qx * xy[i, 0] + qy * xy[i, 1]
-            re += np.cos(phase)
-            im += np.sin(phase)
-        Sq[t] = (re * re + im * im) / N
-    return Sq
- 
- 
-def radial_peak_width(q_values, Sq):
-    """
-    Largeur du pic radial (ecart-type pondere par l'intensite autour
-    du maximum), en A^-1. Plus la valeur est grande, plus l'ordre
-    translationnel est perdu (peak Bragg -> pic diffus).
-    """
-    q0 = q_values[np.argmax(Sq)]
-    weights = Sq / Sq.sum()
-    variance = np.sum(weights * (q_values - q0) ** 2)
-    return np.sqrt(variance), q0
- 
- 
-def first_peak_angle(a_CC=1.42):
-    """ Angle de G_base (meme convention que Observables.py) """
-    G_base = np.array([1.0, -1.0 / np.sqrt(3)])
-    return np.arctan2(G_base[1], G_base[0])
+        sizes : number of atoms of each ring (n_rings,)
+        ring_atoms : atoms of each ring, padded with -1 (n_rings, max_size)
+    '''
+    N = len(xyz)
+    d = bond_vectors(xyz, bonds, Lx, Ly)
+    src = np.r_[bonds[:, 0], bonds[:, 1]]
+    dst = np.r_[bonds[:, 1], bonds[:, 0]]
+    ang = np.arctan2(np.r_[d[:, 1], -d[:, 1]], np.r_[d[:, 0], -d[:, 0]])
+    if not np.all(np.bincount(src, minlength=N) == 3):
+        raise ValueError("every atom must have exactly 3 bonds")
+    nb = dst[np.lexsort((ang, src))].reshape(N, 3)
+    sizes, ring_atoms = _trace_faces(nb, max_size)
+    if sizes.max() > max_size:
+        raise ValueError(f"ring larger than max_size = {max_size}")
+    return sizes, ring_atoms
 
 
-# ---------------------------------------------------------------------
-# 7) Vraie FFT 2D : image du spot de diffraction (ce que Ruslan decrit)
-# ---------------------------------------------------------------------
+def ring_pairs(sizes, ring_atoms):
+    '''
+    Pairs of rings sharing a bond (r1, r2)
+    '''
+    n, m = ring_atoms.shape
+    cols = np.arange(m)
+    valid = cols < sizes[:, None]
+    nxt = ring_atoms[np.arange(n)[:, None], (cols + 1) % sizes[:, None]]
+    a, b = ring_atoms[valid], nxt[valid]
+    r = np.repeat(np.arange(n), sizes)
+    key = np.minimum(a, b) * (a.max() + 1) + np.maximum(a, b)
+    order = np.argsort(key, kind="stable")
+    key, r = key[order], r[order]
+    same = key[:-1] == key[1:]
+    return r[:-1][same], r[1:][same]
 
-def structure_factor_fft_map(xy, Lx, Ly, q_center, window=0.6, n_grid=2048):
-    """
-    Calcule S(q) par vraie FFT 2D (binning des positions + np.fft.fft2),
-    puis retourne une fenetre zoomee autour du pic q_center. Contrairement
-    a structure_factor_ring/radial (sommation directe, plus precise mais
-    ciblee sur un cercle/une ligne), ceci donne une image 2D complete du
-    spot de diffraction -- utile pour une inspection visuelle directe de
-    l'elargissement (radial ET azimutal en meme temps).
-    Inputs:
-        xy : (N,2) positions (sous-reseau A recommande)
-        Lx, Ly : taille de la boite
-        q_center : (qx0, qy0) centre de la fenetre (ex: G_base)
-        window : demi-largeur de la fenetre en q (A^-1)
-        n_grid : resolution du binning (plus grand = plus fin pres du pic)
+
+def atoms_of(N, ring_atoms, selected):
+    '''
+    Atoms belonging to at least one of the selected rings (e.g. sizes != 6: defective atoms)
+    '''
+    mask = np.zeros(N, dtype=bool)
+    r = ring_atoms[selected]
+    mask[r[r >= 0]] = True
+    return mask
+
+
+def defect_graph(sizes, r1, r2):
+    '''
+    Topological defects. A 5 or 7 ring is paired when it shares a bond with a ring of the other kind
+    (bound dislocation) and free otherwise (disclination). The connected components of the subgraph
+    of 5/7 rings are isolated disclinations (size 1), isolated dislocations (5-7 dipoles, size 2) or
+    chains (grain-boundary segments, size >= 3); a 5/7 ring with >= 3 such neighbours is a branching
+    point (triple junction).
     Outputs:
-        sub_Sq : image 2D (n,n) de S(q) autour du pic
-        sub_qx, sub_qy : coordonnees q correspondantes
-    """
-    hist, _, _ = np.histogram2d(xy[:, 0], xy[:, 1], bins=n_grid,
-                                 range=[[0, Lx], [0, Ly]])
-    F = np.fft.fftshift(np.fft.fft2(hist))
-    Sq = np.abs(F) ** 2 / len(xy)
-
-    qx_freqs = np.fft.fftshift(np.fft.fftfreq(n_grid, d=Lx / n_grid)) * 2 * np.pi
-    qy_freqs = np.fft.fftshift(np.fft.fftfreq(n_grid, d=Ly / n_grid)) * 2 * np.pi
-
-    qx0, qy0 = q_center
-    ix = np.argmin(np.abs(qx_freqs - qx0))
-    iy = np.argmin(np.abs(qy_freqs - qy0))
-    nwin = max(1, int(window / (qx_freqs[1] - qx_freqs[0])))
-
-    sub_Sq = Sq[ix - nwin:ix + nwin, iy - nwin:iy + nwin]
-    sub_qx = qx_freqs[ix - nwin:ix + nwin]
-    sub_qy = qy_freqs[iy - nwin:iy + nwin]
-    return sub_Sq, sub_qx, sub_qy
-
-
-def plot_fft_peak_map(sub_Sq, sub_qx, sub_qy, title="", save_path=None):
-    """ Trace la carte 2D du spot de diffraction (imshow). """
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(sub_Sq.T, origin='lower',
-                    extent=[sub_qx[0], sub_qx[-1], sub_qy[0], sub_qy[-1]],
-                    cmap='inferno', aspect='auto')
-    ax.set_xlabel(r"$q_x$ ($\mathrm{\AA}^{-1}$)")
-    ax.set_ylabel(r"$q_y$ ($\mathrm{\AA}^{-1}$)")
-    ax.set_title(title)
-    plt.colorbar(im, ax=ax, label="S(q)")
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
-
-
-def structure_factor_fft_full(xy, Lx, Ly, q_max, n_grid=2048):
-    """
-    Comme structure_factor_fft_map, mais centre sur q=0 et couvre tout
-    le premier anneau (au lieu d'une fenetre autour d'un seul pic) --
-    pour voir les 6 pics d'un coup (solide/hexatique) ou l'anneau
-    isotrope complet (liquide).
-    Inputs:
-        xy : (N,2) positions (sous-reseau A recommande)
-        Lx, Ly : taille de la boite
-        q_max : rayon max couvert (prendre ~1.3-1.5x le rayon du 1er pic)
-        n_grid : resolution du binning
-    Outputs:
-        sub_Sq, sub_qx, sub_qy : carte 2D centree sur q=0
-    """
-    hist, _, _ = np.histogram2d(xy[:, 0], xy[:, 1], bins=n_grid,
-                                 range=[[0, Lx], [0, Ly]])
-    F = np.fft.fftshift(np.fft.fft2(hist))
-    Sq = np.abs(F) ** 2 / len(xy)
-
-    qx_freqs = np.fft.fftshift(np.fft.fftfreq(n_grid, d=Lx / n_grid)) * 2 * np.pi
-    qy_freqs = np.fft.fftshift(np.fft.fftfreq(n_grid, d=Ly / n_grid)) * 2 * np.pi
-
-    ix = np.where(np.abs(qx_freqs) <= q_max)[0]
-    iy = np.where(np.abs(qy_freqs) <= q_max)[0]
-    sub_Sq = Sq[ix[0]:ix[-1] + 1, iy[0]:iy[-1] + 1]
-    sub_qx = qx_freqs[ix[0]:ix[-1] + 1]
-    sub_qy = qy_freqs[iy[0]:iy[-1] + 1]
-    return sub_Sq, sub_qx, sub_qy
-
-
-def plot_fft_full_ring(sub_Sq, sub_qx, sub_qy, title="", save_path=None,
-                        log_scale=False, mask_radius=None):
-    """
-    Trace la carte complete du 1er anneau. Par defaut (log_scale=False),
-    masque le pic central (q=0, bien plus intense que les pics d'ordre 1)
-    pour que l'echelle lineaire reste lisible sur les 6 pics -- sinon
-    utiliser log_scale=True a la place.
-    Inputs:
-        mask_radius : rayon (A^-1) autour de q=0 a masquer. Si None,
-                      calcule automatiquement (30% du bord de la carte).
-    """
-    import matplotlib.pyplot as plt
-    QX, QY = np.meshgrid(sub_qx, sub_qy, indexing='ij')
-    data = sub_Sq.copy()
-
-    if log_scale:
-        data = np.log10(data + 1)
-        label = "log10(S(q)+1)"
-    else:
-        if mask_radius is None:
-            mask_radius = 0.3 * min(abs(sub_qx[0]), abs(sub_qx[-1]))
-        mask = (QX**2 + QY**2) < mask_radius**2
-        data = data.astype(float)
-        data[mask] = np.nan
-        label = "S(q)"
-
-    cmap = plt.get_cmap('inferno').copy()
-    cmap.set_bad('black')
-
-    fig, ax = plt.subplots(figsize=(6.5, 5.5))
-    im = ax.imshow(data.T, origin='lower',
-                    extent=[sub_qx[0], sub_qx[-1], sub_qy[0], sub_qy[-1]],
-                    cmap=cmap, aspect='auto')
-    ax.set_xlabel(r"$q_x$ ($\mathrm{\AA}^{-1}$)")
-    ax.set_ylabel(r"$q_y$ ($\mathrm{\AA}^{-1}$)")
-    ax.set_title(title)
-    plt.colorbar(im, ax=ax, label=label)
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
-
-#  ---------------------------------------------------------------------
-# 8) Anneaux AVEC la liste des atomes (extension de find_rings_numba)
-# ---------------------------------------------------------------------
- 
-@njit
-def find_rings_with_atoms_numba(nb_sorted, deg, max_ring_size=12):
-    """
-    Meme face-tracing que find_rings_numba, mais garde en plus la liste
-    des atomes de chaque anneau (necessaire pour localiser spatialement
-    les defauts, pas juste compter leur proportion globale).
-    Outputs:
-        ring_sizes : (n_rings,)
-        ring_atoms : (n_rings, max_ring_size), pad -1
-        n_excluded : int
-    """
-    N = nb_sorted.shape[0]
-    max_deg = nb_sorted.shape[1]
-    visited = np.zeros((N, max_deg), dtype=np.bool_)
- 
-    ring_sizes = np.empty(N * max_deg, dtype=np.int64)
-    ring_atoms = -np.ones((N * max_deg, max_ring_size), dtype=np.int64)
-    n_rings = 0
-    n_excluded = 0
- 
-    for i in range(N):
-        for si in range(deg[i]):
-            if visited[i, si]:
-                continue
-            j = nb_sorted[i, si]
-            start_i, start_j = i, j
-            cur_a, cur_b, cur_slot = i, j, si
-            length = 0
-            broken = False
-            buf = np.empty(max_ring_size, dtype=np.int64)
- 
-            while True:
-                visited[cur_a, cur_slot] = True
-                if length < max_ring_size:
-                    buf[length] = cur_a
-                length += 1
- 
-                idx = -1
-                for k in range(deg[cur_b]):
-                    if nb_sorted[cur_b, k] == cur_a:
-                        idx = k
-                        break
-                if idx == -1:
-                    broken = True
-                    break
- 
-                next_slot = (idx - 1) % deg[cur_b]
-                c = nb_sorted[cur_b, next_slot]
- 
-                if cur_b == start_i and c == start_j:
-                    break
- 
-                cur_a, cur_b, cur_slot = cur_b, c, next_slot
- 
-                if length > max_ring_size:
-                    broken = True
-                    break
- 
-            if broken:
-                n_excluded += 1
-            else:
-                ring_sizes[n_rings] = length
-                for k in range(length):
-                    ring_atoms[n_rings, k] = buf[k]
-                n_rings += 1
- 
-    return ring_sizes[:n_rings], ring_atoms[:n_rings], n_excluded
- 
- 
-def defect_atom_mask(N, ring_sizes, ring_atoms):
-    """
-    Marque comme "defectueux" tout atome appartenant a au moins un
-    anneau de taille != 6 -- l'analogue topologique exact de ce qui
-    active le pic D en Raman (un defaut ou un bord de cristal).
-    Inputs:
-        N : nombre total d'atomes
-        ring_sizes, ring_atoms : sortie de find_rings_with_atoms_numba
-    Output:
-        is_defect : (N,) bool
-    """
-    is_defect = np.zeros(N, dtype=bool)
-    non_hex = ring_atoms[ring_sizes != 6]
-    flat = non_hex[non_hex >= 0]
-    is_defect[flat] = True
-    return is_defect
- 
- 
-# ---------------------------------------------------------------------
-# 9) Carte I_D(r)/I_G(r) -- analogue optique du mapping Raman
-# ---------------------------------------------------------------------
- 
-def raman_id_ig_map(xy, is_defect, Lx, Ly, n_grid=128, sigma_A=5.0):
-    """
-    Coarse-graine la densite d'atomes defectueux (~I_D) et la densite
-    totale (~I_G) par un noyau gaussien periodique de largeur sigma_A
-    (en Angstrom) -- l'equivalent de la taille du spot laser en Raman.
-    Retourne la carte 2D I_D/I_G ainsi qu'un scalaire global (integre
-    sur tout l'echantillon), directement comparable a un ratio I_D/I_G
-    mesure experimentalement sur l'ensemble d'un grain/echantillon.
- 
-    Inputs:
-        xy : (N,2) positions de TOUS les atomes (A et B, pas seulement A --
-             contrairement a S(q), ici on veut la densite reelle d'atomes)
-        is_defect : (N,) bool, sortie de defect_atom_mask
-        Lx, Ly : taille de boite (periodique)
-        n_grid : resolution de la grille de binning
-        sigma_A : largeur (Angstrom) du noyau gaussien. A ajuster selon
-                  la taille de boite : trop petit -> bruit atome-par-atome
-                  (pas de "spot"), trop grand -> tout se moyenne et les
-                  joints de grains disparaissent. Un bon point de depart
-                  est une fraction (~5-10%) de la taille de grain typique.
- 
-    Outputs:
-        ratio_map : (n_grid, n_grid), I_D/I_G local
-        id_map, ig_map : cartes brutes lissees (densites)
-        global_id_ig : scalaire, I_D/I_G integre sur tout l'echantillon
-                       (= fraction d'atomes defectueux, independante du
-                       choix de sigma_A -- c'est la quantite a tracer vs T)
-    """
-    defect_xy = xy[is_defect]
- 
-    ig_hist, _, _ = np.histogram2d(
-        xy[:, 0], xy[:, 1], bins=n_grid, range=[[0, Lx], [0, Ly]])
-    if defect_xy.shape[0] > 0:
-        id_hist, _, _ = np.histogram2d(
-            defect_xy[:, 0], defect_xy[:, 1], bins=n_grid, range=[[0, Lx], [0, Ly]])
-    else:
-        id_hist = np.zeros_like(ig_hist)
- 
-    sigma_px = sigma_A / (Lx / n_grid)
-    ig_map = gaussian_filter(ig_hist, sigma_px, mode='wrap')
-    id_map = gaussian_filter(id_hist, sigma_px, mode='wrap')
- 
-    eps = 1e-12 * max(ig_map.max(), 1.0)
-    ratio_map = id_map / (ig_map + eps)
- 
-    global_id_ig = id_hist.sum() / ig_hist.sum()
- 
-    return ratio_map, id_map, ig_map, global_id_ig
- 
- 
-def plot_raman_map(ratio_map, Lx, Ly, title="", save_path=None, vmax=None):
-    """ Trace la carte spatiale I_D/I_G (imshow), analogue d'un mapping Raman. """
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6, 5.2))
-    im = ax.imshow(ratio_map.T, origin='lower', extent=[0, Lx, 0, Ly],
-                    cmap='inferno', aspect='equal', vmax=vmax)
-    ax.set_xlabel(r"$x$ ($\mathrm{\AA}$)")
-    ax.set_ylabel(r"$y$ ($\mathrm{\AA}$)")
-    ax.set_title(title)
-    plt.colorbar(im, ax=ax, label=r"$I_D/I_G$")
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
- 
- 
-# ---------------------------------------------------------------------
-# 10) Analogue I_D/I_D' -- dislocations liees vs disclinaisons libres
-# ---------------------------------------------------------------------
-#
-# KTHNY distingue les deux transitions par le CARACTERE du desordre
-# topologique, pas juste sa quantite :
-#   - solide -> hexatique : depiegeage de PAIRES de dislocations liees
-#     (un anneau 5 et un anneau 7 adjacents, partageant une arete)
-#   - hexatique -> liquide : depiegeage de DISCLINAISONS LIBRES
-#     (un 5 ou un 7 sans partenaire complementaire adjacent)
-# C'est l'exact analogue topologique du rapport experimental I_D/I_D',
-# qui differencie le TYPE de defaut (sp3 ~13, lacune ~7, GB ~3.5) plutot
-# que juste I_D qui n'en mesure que la quantite.
- 
-def _ring_ring_edges(ring_sizes, ring_atoms):
-    """
-    Toutes les paires d'anneaux adjacents (partageant une arete),
-    calculees de facon vectorisee -- meme technique que
-    classify_defect_clusters (cle d'arete unique + tri), mais SANS
-    restriction aux anneaux 5/7. Remplace l'ancienne construction par
-    defaultdict Python (ring_adjacency), qui domine le temps de calcul
-    sur des systemes reels (~95% du temps total mesure sur un fichier
-    a 60k anneaux) et est appelee deux fois pour rien (une fois dans
-    classify_dislocations, une fois dans defect_chain_degree).
-    Output: r1, r2 : (n_edges,) indices d'anneaux, une paire par arete
-            partagee entre exactement 2 anneaux
-    """
-    n_r, max_size = ring_atoms.shape
-    valid = ring_atoms >= 0
-    lengths = valid.sum(axis=1)
-    shifted = np.full_like(ring_atoms, -1)
-    for L in np.unique(lengths):
-        if L == 0:
-            continue
-        rows = np.where(lengths == L)[0]
-        shifted[rows, :L] = np.roll(ring_atoms[rows, :L], -1, axis=1)
-
-    ring_idx = np.repeat(np.arange(n_r), max_size)
-    a = ring_atoms.ravel()
-    b = shifted.ravel()
-    keep = (a >= 0) & (b >= 0)
-    ring_idx, a, b = ring_idx[keep], a[keep], b[keep]
-
-    key = np.minimum(a, b).astype(np.int64) * (int(a.max()) + 1) + np.maximum(a, b)
-    order = np.argsort(key, kind='stable')
-    key_sorted = key[order]
-    ring_sorted = ring_idx[order]
-
-    same_as_next = key_sorted[:-1] == key_sorted[1:]
-    r1 = ring_sorted[:-1][same_as_next]
-    r2 = ring_sorted[1:][same_as_next]
-    return r1, r2
-
-
-def ring_adjacency(ring_sizes, ring_atoms):
-    """
-    Determine quels anneaux partagent une arete (bond) -- chaque arete
-    du reseau planaire borde exactement 2 anneaux, ce qui donne
-    directement les voisins topologiques de chaque anneau. Conserve
-    pour compatibilite/exploration (ex. notebook) ; en interne,
-    classify_dislocations et defect_chain_degree n'appellent plus
-    cette fonction et utilisent directement _ring_ring_edges (evite la
-    conversion couteuse en liste de sets Python quand on n'en a pas
-    besoin).
-    Output: liste de sets, neighbor_rings[i] = indices des anneaux
-            adjacents a l'anneau i.
-    """
-    r1, r2 = _ring_ring_edges(ring_sizes, ring_atoms)
-    neighbor_rings = [set() for _ in range(len(ring_sizes))]
-    for i, j in zip(r1.tolist(), r2.tolist()):
-        neighbor_rings[i].add(j)
-        neighbor_rings[j].add(i)
-    return neighbor_rings
-
-
-def classify_dislocations(ring_sizes, ring_atoms):
-    """
-    Classe chaque anneau 5 ou 7 comme "apparie" (fait partie d'une
-    dislocation liee : un 5 et un 7 voisins, partageant une arete) ou
-    "libre" (disclinaison non appariee -- pas de partenaire
-    complementaire adjacent). Les anneaux 6 (et autres tailles) ne sont
-    pas concernes, is_paired vaut False pour eux par defaut.
-    Output:
-        is_paired : (n_rings,) bool
-    """
-    r1, r2 = _ring_ring_edges(ring_sizes, ring_atoms)
-    complementary = ((ring_sizes[r1] == 5) & (ring_sizes[r2] == 7)) | \
-                    ((ring_sizes[r1] == 7) & (ring_sizes[r2] == 5))
-
-    is_paired = np.zeros(len(ring_sizes), dtype=bool)
-    is_paired[r1[complementary]] = True
-    is_paired[r2[complementary]] = True
-    return is_paired
- 
- 
-def dislocation_disclination_fractions(ring_sizes, is_paired):
-    """
-    Reduit la classification par anneau a des scalaires globaux.
-    Outputs:
-        n_paired : nb d'anneaux 5/7 dans une paire de dislocation
-        n_free : nb d'anneaux 5/7 libres (disclinaisons non appariees)
-        free_fraction : n_free / (n_free + n_paired), borne [0,1] --
-                        0 = tous les defauts sont des dislocations liees
-                        (attendu solide/hexatique), 1 = tous sont des
-                        disclinaisons libres (attendu liquide). C'est
-                        la quantite a tracer vs T (bien definie partout).
-        id_idprime : n_free / n_paired, analogue direct du rapport
-                     experimental I_D/I_D' (diverge si n_paired -> 0,
-                     donc plus bruite a basse T -- garder free_fraction
-                     comme observable principale).
-    """
-    non_hex = (ring_sizes == 5) | (ring_sizes == 7)
-    n_paired = int(np.sum(is_paired[non_hex]))
-    n_free = int(np.sum(non_hex) - n_paired)
-    denom = n_free + n_paired
-    free_fraction = n_free / denom if denom > 0 else np.nan
-    id_idprime = n_free / n_paired if n_paired > 0 else np.inf
-    return n_paired, n_free, free_fraction, id_idprime
- 
- 
-def defect_type_atom_masks(N, ring_sizes, ring_atoms, is_paired):
-    """
-    Comme defect_atom_mask, mais separe les atomes appartenant a une
-    dislocation liee de ceux appartenant a une disclinaison libre --
-    pour une carte spatiale distinguant les deux types de defaut
-    (utile pour verifier que les disclinaisons libres apparaissent bien
-    plutot au coeur des joints de grains desordonnes en regime liquide).
-    """
-    is_paired_atom = np.zeros(N, dtype=bool)
-    is_free_atom = np.zeros(N, dtype=bool)
- 
-    non_hex_idx = np.where((ring_sizes == 5) | (ring_sizes == 7))[0]
-    for ridx in non_hex_idx:
-        atoms = ring_atoms[ridx]
-        atoms = atoms[atoms >= 0]
-        if is_paired[ridx]:
-            is_paired_atom[atoms] = True
-        else:
-            is_free_atom[atoms] = True
- 
-    return is_paired_atom, is_free_atom
- 
- 
-# ---------------------------------------------------------------------
-# 11) Composantes connexes de defauts -- separer defaut thermique
-#     (isole) de segment de joint de grain structurel (chaine longue)
-# ---------------------------------------------------------------------
-#
-# classify_dislocations/is_paired ci-dessus comptait toute une CHAINE de
-# joint de grain comme "appariee" des qu'un anneau a un seul voisin
-# complementaire -- ce qui noie le signal thermique dans le fond
-# structurel des joints de grains (fixes des T~0 par la construction
-# Voronoi). Ici on regroupe plutot les anneaux 5/7 en composantes
-# connexes du sous-graphe restreint aux anneaux 5/7 entre eux, et on
-# classe chaque COMPOSANTE (pas chaque anneau) par sa taille :
-#   - taille 1 : disclinaison isolee (vraiment libre, aucun voisin 5/7)
-#   - taille 2 (un 5 + un 7) : dislocation isolee -- le vrai dipole
-#     lie de KTHNY, distinct d'un simple maillon de chaine
-#   - taille >= 3 : segment etendu -- typiquement un morceau de joint
-#     de grain structurel (chaine 5-7-5-7...), presente meme a basse T
- 
-def classify_defect_clusters(ring_sizes, ring_atoms):
-    """
-    Version vectorisee (numpy + scipy.sparse.csgraph, code C compile)
-    de la meme idee que ci-dessus -- BEAUCOUP plus rapide que des
-    boucles Python pour les gros systemes (N ~ 1e5 atomes).
- 
-    Output:
-        component_id : (n_rings,) int, -1 pour les anneaux 6/autres,
-                        sinon indice de la composante connexe
-        component_sizes : (n_components,) taille (en nb d'anneaux) de
-                           chaque composante
-    """
-    n_rings = len(ring_sizes)
-    non_hex = (ring_sizes == 5) | (ring_sizes == 7)
- 
-    # 1) Aplatir tous les anneaux en aretes (ring_idx, atom_a, atom_b),
-    #    par decalage cyclique vectorise (groupe par longueur d'anneau
-    #    pour eviter une boucle Python par anneau).
-    n_r, max_size = ring_atoms.shape
-    valid = ring_atoms >= 0
-    lengths = valid.sum(axis=1)
-    shifted = np.full_like(ring_atoms, -1)
-    for L in np.unique(lengths):
-        if L == 0:
-            continue
-        rows = np.where(lengths == L)[0]
-        shifted[rows, :L] = np.roll(ring_atoms[rows, :L], -1, axis=1)
- 
-    ring_idx = np.repeat(np.arange(n_r), max_size)
-    a = ring_atoms.ravel()
-    b = shifted.ravel()
-    keep = (a >= 0) & (b >= 0)
-    ring_idx, a, b = ring_idx[keep], a[keep], b[keep]
- 
-    # 2) Chaque arete non-orientee est partagee par exactement 2
-    #    anneaux -- les retrouver en triant une cle unique par arete et
-    #    en reperant les paires consecutives egales (sort au lieu d'un
-    #    dict Python).
-    key = np.minimum(a, b).astype(np.int64) * (int(a.max()) + 1) + np.maximum(a, b)
-    order = np.argsort(key, kind='stable')
-    key_sorted = key[order]
-    ring_sorted = ring_idx[order]
- 
-    same_as_next = key_sorted[:-1] == key_sorted[1:]
-    r1 = ring_sorted[:-1][same_as_next]
-    r2 = ring_sorted[1:][same_as_next]
- 
-    # 3) Ne garder que les aretes entre deux anneaux non-hexagonaux
-    #    (5 ou 7), puis composantes connexes via scipy (C compile).
-    both_non_hex = non_hex[r1] & non_hex[r2]
-    r1, r2 = r1[both_non_hex], r2[both_non_hex]
- 
-    graph = coo_matrix((np.ones(len(r1)), (r1, r2)), shape=(n_rings, n_rings))
-    _, labels = connected_components(graph, directed=False)
- 
-    component_id = np.where(non_hex, labels, -1)
-    unique_labels, component_sizes = np.unique(labels[non_hex], return_counts=True)
- 
-    return component_id, component_sizes
- 
- 
-def cluster_size_fractions(component_sizes):
-    """
-    Reduit les tailles de composantes a des fractions globales, en
-    nombre de COMPOSANTES (pas d'anneaux) -- une longue chaine ne
-    compte que pour 1, ce qui l'empeche de dominer numeriquement le
-    compte a cause de sa taille.
-    Outputs:
-        f_isolated : fraction de composantes de taille 1
-        f_dipole : fraction de composantes de taille 2
-        f_chain : fraction de composantes de taille >= 3
-        mean_size : taille moyenne des composantes (indicateur continu
-                    complementaire, sensible a la croissance des chaines)
-    """
-    n = len(component_sizes)
-    if n == 0:
-        return np.nan, np.nan, np.nan, np.nan
-    f_isolated = float(np.mean(component_sizes == 1))
-    f_dipole = float(np.mean(component_sizes == 2))
-    f_chain = float(np.mean(component_sizes >= 3))
-    mean_size = float(np.mean(component_sizes))
-    return f_isolated, f_dipole, f_chain, mean_size
- 
- 
-# ---------------------------------------------------------------------
-# 12) Champ de deformation locale -- analogue du splitting Raman G+/G-
-# ---------------------------------------------------------------------
-#
-# Le splitting G+/G- vient de la levee de degenerescence du mode E2g
-# sous contrainte anisotrope (effet Gruneisen) : une deformation
-# ISOTROPE decale G globalement (sans le splitter), une deformation
-# DEVIATORIQUE (cisaillement/uniaxiale) le splitte en G+/G-.
-# Analogue topologique : pour chaque atome 3-coordonne, le tenseur de
-# second moment Q = <b_k ⊗ b_k> sur ses 3 vecteurs de liaison est
-# ISOTROPE (independamment de l'orientation locale du reseau) si les 3
-# liaisons sont a 120° et de meme longueur -- toute anisotropie de Q
-# trahit une distorsion locale (contrainte de cisaillement), et toute
-# variation de sa trace trahit une dilatation/compression isotrope.
- 
-@njit(parallel=True)
-def local_strain_field(xy, nb_sorted, deg, Lx, Ly, a_CC=1.42):
-    """
-    Outputs (arrays (N,), NaN pour les atomes non 3-coordonnes -- bords
-    d'anneaux exclus/casses) :
-        eps_hydro : (L_moyenne - a_CC)/a_CC -- deformation isotrope,
-                    analogue du decalage global du pic G (parametre de
-                    Gruneisen isotrope)
-        eps_dev : sqrt((Qxx-Qyy)^2 + 4*Qxy^2) / (Qxx+Qyy) -- anisotropie
-                  normalisee (sans dimension, ~0 a ~1) du tenseur de
-                  liaison, analogue de l'amplitude du splitting G+/G-
-    """
-    N = xy.shape[0]
-    eps_hydro = np.full(N, np.nan)
-    eps_dev = np.full(N, np.nan)
- 
-    for i in prange(N):
-        if deg[i] != 3:
-            continue
-        bx = np.empty(3)
-        by = np.empty(3)
-        for k in range(3):
-            j = nb_sorted[i, k]
-            dx = xy[j, 0] - xy[i, 0]
-            dy = xy[j, 1] - xy[i, 1]
-            dx -= Lx * round(dx / Lx)
-            dy -= Ly * round(dy / Ly)
-            bx[k] = dx
-            by[k] = dy
- 
-        Lsum = 0.0
-        Qxx = 0.0
-        Qyy = 0.0
-        Qxy = 0.0
-        for k in range(3):
-            Lk = np.sqrt(bx[k] * bx[k] + by[k] * by[k])
-            Lsum += Lk
-            Qxx += bx[k] * bx[k]
-            Qyy += by[k] * by[k]
-            Qxy += bx[k] * by[k]
-        Qxx /= 3.0
-        Qyy /= 3.0
-        Qxy /= 3.0
- 
-        eps_hydro[i] = (Lsum / 3.0 - a_CC) / a_CC
-        trace = Qxx + Qyy
-        if trace > 0.0:
-            eps_dev[i] = np.sqrt((Qxx - Qyy) ** 2 + 4.0 * Qxy ** 2) / trace
- 
-    return eps_hydro, eps_dev
- 
- 
-def scalar_field_map(xy, values, Lx, Ly, n_grid=128, sigma_A=25.0):
-    """
-    Carte 2D lissee d'un champ scalaire par atome (ex: eps_dev), meme
-    lissage gaussien "spot laser" que raman_id_ig_map. Les NaN (atomes
-    non 3-coordonnes) sont exclus du poids comme du compte.
-    Outputs:
-        field_map : (n_grid, n_grid), moyenne locale ponderee
-        global_mean, global_rms : scalaires sur tous les atomes valides
-    """
-    valid = ~np.isnan(values)
-    xy_v = xy[valid]
-    val_v = values[valid]
- 
-    weighted_hist, _, _ = np.histogram2d(
-        xy_v[:, 0], xy_v[:, 1], bins=n_grid, range=[[0, Lx], [0, Ly]], weights=val_v)
-    count_hist, _, _ = np.histogram2d(
-        xy_v[:, 0], xy_v[:, 1], bins=n_grid, range=[[0, Lx], [0, Ly]])
- 
-    sigma_px = sigma_A / (Lx / n_grid)
-    weighted_smooth = gaussian_filter(weighted_hist, sigma_px, mode='wrap')
-    count_smooth = gaussian_filter(count_hist, sigma_px, mode='wrap')
- 
-    eps = 1e-12
-    field_map = weighted_smooth / (count_smooth + eps)
-    global_mean = float(val_v.mean())
-    global_rms = float(np.sqrt(np.mean(val_v ** 2)))
-    return field_map, global_mean, global_rms
- 
- 
-def plot_strain_map(field_map, Lx, Ly, title="", save_path=None, vmax=None, cmap='viridis'):
-    """ Trace la carte spatiale d'un champ de deformation (imshow). """
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6, 5.2))
-    im = ax.imshow(field_map.T, origin='lower', extent=[0, Lx, 0, Ly],
-                    cmap=cmap, aspect='equal', vmax=vmax)
-    ax.set_xlabel(r"$x$ ($\mathrm{\AA}$)")
-    ax.set_ylabel(r"$y$ ($\mathrm{\AA}$)")
-    ax.set_title(title)
-    plt.colorbar(im, ax=ax)
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
- 
- 
-def masked_rms(values, mask):
-    """
-    RMS de 'values' restreint aux atomes ou mask est True (et values
-    non NaN). Reutilise des champs deja calcules (eps_dev, is_defect)
-    sans repasser dessus -- cout quasi nul, juste de l'indexation
-    booleenne numpy. Sert a isoler l'intensite de la contrainte AU
-    NIVEAU DES DEFAUTS plutot que de la diluer sur tout l'echantillon
-    (la plupart des atomes, a l'interieur des grains, ont eps_dev~0
-    a toute temperature puisque seule l'orientation des grains est
-    thermalisee -- les moyenner avec noie le signal).
-    """
-    valid = mask & ~np.isnan(values)
-    if not np.any(valid):
-        return np.nan
-    return float(np.sqrt(np.mean(values[valid] ** 2)))
-
-
-# ---------------------------------------------------------------------
-# 13) Centroide d'anneau (unwrapped, periodique) -- brique commune aux
-#     deux analyses geometriques ci-dessous
-# ---------------------------------------------------------------------
-
-def ring_centroid(ring_atoms, xy, Lx, Ly):
-    """
-    Position centroide de chaque anneau, moyenne des positions de ses
-    atomes en tenant compte de la periodicite (chaque atome est ramene
-    a l'image minimale par rapport au premier atome de l'anneau avant
-    la moyenne) -- sinon un anneau a cheval sur le bord de boite donne
-    un centroide faux (moyenne de deux images opposees).
-    Le resultat peut sortir de [0, L) (unwrapped) : c'est voulu, il
-    reste correct pour des distances MIC ulterieures entre centroides.
-    Inputs:
-        ring_atoms : (n_rings, max_size) indices d'atomes, pad -1
-        xy : (N,2) positions
-        Lx, Ly : taille de boite
-    Output:
-        centroids : (n_rings, 2)
-    """
-    n_rings, max_size = ring_atoms.shape
-    valid = ring_atoms >= 0
-    ref_idx = ring_atoms[:, 0]
-    ref_xy = xy[ref_idx]
-
-    acc_x = np.zeros(n_rings)
-    acc_y = np.zeros(n_rings)
-    for k in range(max_size):
-        mask_k = valid[:, k]
-        atoms_k = np.where(mask_k, ring_atoms[:, k], ref_idx)
-        pos_k = xy[atoms_k]
-        dx = pos_k[:, 0] - ref_xy[:, 0]
-        dy = pos_k[:, 1] - ref_xy[:, 1]
-        dx -= Lx * np.round(dx / Lx)
-        dy -= Ly * np.round(dy / Ly)
-        acc_x += np.where(mask_k, dx, 0.0)
-        acc_y += np.where(mask_k, dy, 0.0)
-
-    counts = valid.sum(axis=1)
-    centroids = np.empty((n_rings, 2))
-    centroids[:, 0] = ref_xy[:, 0] + acc_x / counts
-    centroids[:, 1] = ref_xy[:, 1] + acc_y / counts
-    return centroids
-
-
-def _group_defect_clusters(ring_sizes, ring_atoms):
-    """
-    Regroupe les anneaux 5/7 par cluster (composante connexe de
-    classify_defect_clusters) via UN SEUL tri global des labels, au
-    lieu de chercher les membres de chaque cluster un par un
-    (np.where(component_id==lbl) repete) -- O(n_rings log n_rings)
-    au lieu de O(n_clusters * n_rings), ce qui compte pour les gros
-    systemes (N ~ 1e5) ou pres de la transition (beaucoup de clusters).
-    Les membres de chaque cluster sont contigus dans idx_sorted, donc
-    directement exploitables avec np.add.reduceat pour des sommes
-    par groupe sans boucle Python.
-    Output:
-        component_id : (n_rings,), -1 pour les anneaux 6/autres
-        unique_labels : (n_clusters,) valeurs de label des clusters
-        start_idx : (n_clusters,) indice de debut de chaque groupe
-                    dans idx_sorted
-        counts : (n_clusters,) taille (nb d'anneaux) de chaque cluster,
-                 alignee avec unique_labels
-        idx_sorted : (n_non_hex,) indices d'anneaux tries par cluster
-                     -- idx_sorted[start_idx[i]:start_idx[i]+counts[i]]
-                     donne les anneaux du cluster i
-    """
-    component_id, _ = classify_defect_clusters(ring_sizes, ring_atoms)
-    idx_non_hex = np.where(component_id >= 0)[0]
-    labels_non_hex = component_id[idx_non_hex]
-
-    order = np.argsort(labels_non_hex, kind='stable')
-    idx_sorted = idx_non_hex[order]
-    labels_sorted = labels_non_hex[order]
-
-    unique_labels, start_idx, counts = np.unique(
-        labels_sorted, return_index=True, return_counts=True)
-
-    return component_id, unique_labels, start_idx, counts, idx_sorted
-
-
-# ---------------------------------------------------------------------
-# 14) Distance de separation des dipoles 5-7 (dislocations liees isolees)
-# ---------------------------------------------------------------------
-#
-# KTHNY: la transition solide -> hexatique est le depiegeage de PAIRES
-# de disclinaisons liees (dislocations, un 5 et un 7 adjacents). Le
-# mecanisme de Kosterlitz-Thouless predit que la separation typique r
-# de ces paires liees CROIT a l'approche de Tc puis diverge au
-# depiegeage -- c'est une prediction geometrique directe, indepen-
-# dante de toute technique experimentale, testable directement sur les
-# anneaux deja detectes (classify_defect_clusters isole precisement
-# les paires 5-7 isolees, composantes de taille 2).
-
-def dipole_57_separations(ring_sizes, ring_atoms, xy, Lx, Ly):
-    """
-    Distance (Angstrom) entre le 5 et le 7 de chaque dipole isole
-    (dislocation liee non voisine d'un autre defaut 5/7 -- composante
-    connexe de taille exactement 2 dans le sous-graphe des anneaux
-    5/7, cf. classify_defect_clusters). Les rares composantes de
-    taille 2 formees de deux anneaux de meme signe (5-5 ou 7-7
-    adjacents, pas un vrai dipole KTHNY) sont exclues.
-    Output:
-        separations : (n_dipoles,) une valeur par dipole isole trouve
-    """
-    _, unique_labels, start_idx, counts, idx_sorted = _group_defect_clusters(ring_sizes, ring_atoms)
-    centroids = ring_centroid(ring_atoms, xy, Lx, Ly)
-
-    dipole_mask = counts == 2
-    m1 = idx_sorted[start_idx[dipole_mask]]
-    m2 = idx_sorted[start_idx[dipole_mask] + 1]
-
-    is_57 = ((ring_sizes[m1] == 5) & (ring_sizes[m2] == 7)) | \
-            ((ring_sizes[m1] == 7) & (ring_sizes[m2] == 5))
-    m1, m2 = m1[is_57], m2[is_57]
-
-    dx = centroids[m1, 0] - centroids[m2, 0]
-    dy = centroids[m1, 1] - centroids[m2, 1]
-    dx -= Lx * np.round(dx / Lx)
-    dy -= Ly * np.round(dy / Ly)
-
-    return np.hypot(dx, dy)
-
-
-def plot_dipole_separation_hist(separations, title="", save_path=None, bins=30, r_max=None):
-    """ Histogramme des distances de separation des dipoles 5-7 d'un fichier. """
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6, 4.5))
-    if len(separations) > 0:
-        rng = (0, r_max) if r_max is not None else (0, separations.max() * 1.05)
-        ax.hist(separations, bins=bins, range=rng, color="tab:purple", alpha=0.8)
-        ax.axvline(separations.mean(), color="black", ls="--", lw=1,
-                   label=f"mean = {separations.mean():.2f} \u00c5")
-        ax.legend()
-    ax.set_xlabel(r"dipole separation $r$ ($\mathrm{\AA}$)")
-    ax.set_ylabel("count")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
-
-
-# ---------------------------------------------------------------------
-# 15) Correlation spatiale des tailles de cluster de defauts
-# ---------------------------------------------------------------------
-#
-# Complementaire de la distribution des tailles seule (deja captee par
-# cluster_size_fractions) : teste si les GRANDS clusters (segments
-# etendus de joint de grain) sont eux-memes regroupes spatialement
-# (attendu si les defauts s'organisent le long de structures de joint
-# de grain plutot que d'etre distribues au hasard), ou si au contraire
-# les tailles de cluster sont spatialement independantes (attendu pour
-# des defauts purement thermiques, non correles).
-
-def cluster_centroids_and_sizes(ring_sizes, ring_atoms, xy, Lx, Ly):
-    """
-    Position centroide (moyenne periodique des centroides de ses
-    anneaux membres) et taille (nb d'anneaux) de chaque cluster de
-    defauts 5/7 (composante connexe, cf. classify_defect_clusters).
-    Outputs:
-        centroids : (n_clusters, 2)
-        sizes : (n_clusters,) nb d'anneaux par cluster
-    """
-    _, unique_labels, start_idx, counts, idx_sorted = _group_defect_clusters(ring_sizes, ring_atoms)
-    ring_centroids = ring_centroid(ring_atoms, xy, Lx, Ly)
-
-    n_clusters = len(unique_labels)
-    ref_idx_per_group = idx_sorted[start_idx]          # 1er anneau de chaque cluster
-    group_id = np.repeat(np.arange(n_clusters), counts)  # aligne avec idx_sorted
-    ref_xy_per_member = ring_centroids[ref_idx_per_group[group_id]]
-    member_xy = ring_centroids[idx_sorted]
-
-    dx = member_xy[:, 0] - ref_xy_per_member[:, 0]
-    dy = member_xy[:, 1] - ref_xy_per_member[:, 1]
-    dx -= Lx * np.round(dx / Lx)
-    dy -= Ly * np.round(dy / Ly)
-
-    sum_dx = np.add.reduceat(dx, start_idx)
-    sum_dy = np.add.reduceat(dy, start_idx)
-
-    centroids = np.empty((n_clusters, 2))
-    centroids[:, 0] = ring_centroids[ref_idx_per_group, 0] + sum_dx / counts
-    centroids[:, 1] = ring_centroids[ref_idx_per_group, 1] + sum_dy / counts
-
-    return centroids, counts
-
-
-def cluster_size_spatial_correlation(centroids, sizes, Lx, Ly, r_bins):
-    """
-    Fonction de correlation spatiale des tailles de cluster :
-        C(r) = < (s_i - <s>)(s_j - <s>) >_{|r_ij| in bin} / var(s)
-    moyennee sur toutes les paires de clusters separees d'une distance
-    dans chaque bin de r_bins (distance MIC, periodique). Normalisee
-    par var(s) pour que C ~ 1 a tres courte distance (r plus petit que
-    la taille typique d'un cluster, peu de paires) et C -> 0 si les
-    tailles sont spatialement independantes a grande distance.
-    Inputs:
-        centroids, sizes : sortie de cluster_centroids_and_sizes
-        Lx, Ly : taille de boite
-        r_bins : bords des bins de distance (Angstrom), array croissant
-    Outputs:
-        r_centers : (n_bins,) centre de chaque bin
-        C_r : (n_bins,) NaN si aucune paire dans le bin
-        n_pairs : (n_bins,) nb de paires par bin (statistique typique-
-                  ment faible sur un seul fichier -- cumuler sur les k
-                  repetitions d'une meme T avant d'interpreter la forme
-                  de C(r), pas seulement sa moyenne/std globale)
-    """
-    r_centers = 0.5 * (r_bins[:-1] + r_bins[1:])
-    n_bins = len(r_centers)
+        is57, paired : (n_rings,) masks
+        component : connected component of each 5/7 ring, -1 for the other rings
+        degree : number of 5/7 neighbours of each ring
+    '''
     n = len(sizes)
-    if n < 2:
-        return r_centers, np.full(n_bins, np.nan), np.zeros(n_bins, dtype=int)
-
-    mean_s = sizes.mean()
-    var_s = sizes.var()
-    ds = sizes - mean_s
-
-    ii, jj = np.triu_indices(n, k=1)
-    dx = centroids[ii, 0] - centroids[jj, 0]
-    dy = centroids[ii, 1] - centroids[jj, 1]
-    dx -= Lx * np.round(dx / Lx)
-    dy -= Ly * np.round(dy / Ly)
-    r = np.hypot(dx, dy)
-    prod = ds[ii] * ds[jj]
-
-    bin_idx = np.digitize(r, r_bins) - 1
-    C_r = np.full(n_bins, np.nan)
-    n_pairs = np.zeros(n_bins, dtype=int)
-    for b in range(n_bins):
-        sel = bin_idx == b
-        n_pairs[b] = int(sel.sum())
-        if n_pairs[b] > 0 and var_s > 0:
-            C_r[b] = float(prod[sel].mean() / var_s)
-
-    return r_centers, C_r, n_pairs
+    is57 = (sizes == 5) | (sizes == 7)
+    both = is57[r1] & is57[r2]
+    r1, r2 = r1[both], r2[both]
+    paired = np.zeros(n, dtype=bool)
+    opposite = sizes[r1] != sizes[r2]
+    paired[r1[opposite]] = paired[r2[opposite]] = True
+    _, labels = connected_components(coo_matrix((np.ones(len(r1)), (r1, r2)), shape=(n, n)), directed=False)
+    component = np.where(is57, labels, -1)
+    degree = np.bincount(np.r_[r1, r2], minlength=n)
+    return is57, paired, component, degree
 
 
-def plot_cluster_size_correlation(r_centers, C_r, n_pairs, title="", save_path=None):
-    """
-    Trace C(r) (avec les points sans paires simplement absents) et
-    annote chaque point avec son nombre de paires -- utile pour juger
-    d'un coup d'oeil la fiabilite statistique de chaque bin.
-    """
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6.5, 4.5))
-    valid = ~np.isnan(C_r)
-    ax.plot(r_centers[valid], C_r[valid], marker='o', color="teal")
-    ax.axhline(0, color="black", lw=0.8, ls=":")
-    ax.set_xlabel(r"$r$ ($\mathrm{\AA}$)")
-    ax.set_ylabel(r"$C(r)$ (taille de cluster, normalisee)")
-    ax.set_title(title)
-    ax.grid(alpha=0.3)
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
+def ring_centroids(sizes, ring_atoms, xy, Lx, Ly):
+    '''
+    Centre of each ring (periodic average of its atoms, may lie outside the box)
+    '''
+    valid = ring_atoms >= 0
+    ref = xy[ring_atoms[:, 0]]
+    d = min_image(xy[np.where(valid, ring_atoms, ring_atoms[:, :1])] - ref[:, None], Lx, Ly)
+    return ref + (d * valid[..., None]).sum(axis=1) / sizes[:, None]
 
 
-# ---------------------------------------------------------------------
-# 16) Densite de disclinaisons libres aux jonctions triples
-# ---------------------------------------------------------------------
-#
-# Une jonction triple (Beausir & Fressengeas, litterature TEM/mecanique
-# des dislocations) est le point ou 3 segments de joint de grain se
-# rencontrent -- purement topologique ici : dans le sous-graphe des
-# anneaux 5/7 (deja construit par ring_adjacency pour
-# classify_dislocations), un maillon INTERIEUR de chaine a 2 voisins
-# 5/7, une EXTREMITE ou un DIPOLE isole en a 1, et un point de
-# BRANCHEMENT (jonction triple ou plus) en a >= 3. Aucune donnee de
-# germes/Voronoi n'est necessaire.
-#
-# Une jonction triple generale (angles de desorientation quelconques)
-# porte intrinsequement une charge de disclinaison residuelle (nulle
-# seulement dans le cas symetrique a 120 deg) -- on teste ici si les
-# disclinaisons LIBRES (non appariees, cf. classify_dislocations) sont
-# spatialement enrichies pres de ces jonctions plutot qu'uniformement
-# reparties le long des joints de grain.
-
-def defect_chain_degree(ring_sizes, ring_atoms):
-    """
-    Degre de chaque anneau 5/7 DANS LE SOUS-GRAPHE DES ANNEAUX 5/7
-    (nb de voisins -- anneaux partageant une arete -- qui sont
-    eux-memes 5 ou 7). 0 pour les anneaux hexagonaux/autres.
-        degre 1 : extremite de chaine ou dipole isole
-        degre 2 : maillon interieur d'une chaine (joint de grain lineaire)
-        degre >= 3 : point de branchement -- jonction triple (ou plus)
-    """
-    r1, r2 = _ring_ring_edges(ring_sizes, ring_atoms)
-    non_hex = (ring_sizes == 5) | (ring_sizes == 7)
-    both_non_hex = non_hex[r1] & non_hex[r2]
-    r1f, r2f = r1[both_non_hex], r2[both_non_hex]
-
-    degree = np.bincount(
-        np.concatenate([r1f, r2f]), minlength=len(ring_sizes))
-    return degree
+def group_mean(labels, xy, Lx, Ly):
+    '''
+    Periodic mean position and size of each group of points with the same label
+    '''
+    _, first, inv, counts = np.unique(labels, return_index=True, return_inverse=True, return_counts=True)
+    ref = xy[first]
+    d = min_image(xy - ref[inv], Lx, Ly)
+    return ref + np.stack([np.bincount(inv, d[:, 0]), np.bincount(inv, d[:, 1])], axis=1) / counts[:, None], counts
 
 
-def triple_junction_disclination_enrichment(ring_sizes, ring_atoms, xy, Lx, Ly,
-                                             n_random=None, min_degree=3, seed=None):
-    """
-    Teste l'enrichissement spatial des disclinaisons libres pres des
-    jonctions triples via la distance au plus proche voisin (fonction
-    G de statistique spatiale), plutot qu'un rayon fixe -- un rayon
-    fixe sature des que les disques de voisinage autour de chaque
-    jonction se recouvrent, ce qui arrive vite quand il y a beaucoup
-    de jonctions (observe sur des systemes reels ~540x545 Angstrom
-    avec plusieurs centaines de jonctions).
-    Methode (test contre l'hypothese nulle de repartition spatiale
-    completement aleatoire, CSR) :
-      - d_free : distance (MIC) de chaque disclinaison libre a la
-        jonction la plus proche
-      - d_random : meme chose pour n_random points uniformement
-        distribues dans la boite (baseline CSR)
-      Si les disclinaisons libres s'accumulent pres des jonctions,
-      d_free doit etre systematiquement plus petite que d_random.
-    Inputs:
-        n_random : nb de points CSR a tirer (defaut: max(n_free, 200))
-        min_degree : degre minimal pour qu'un anneau 5/7 soit une
-                     jonction triple (3 par defaut)
-        seed : graine du tirage aleatoire (reproductibilite)
-    Output: dict avec
-        n_junctions, n_free_total, junction_xy, free_xy,
-        d_free, d_random (arrays de distances, Angstrom),
-        median_free, median_random,
-        enrichment (= median_random / median_free ; > 1 = les
-        disclinaisons libres sont, en mediane, plus proches des
-        jonctions qu'attendu au hasard)
-    """
-    r1, r2 = _ring_ring_edges(ring_sizes, ring_atoms)
-    non_hex = (ring_sizes == 5) | (ring_sizes == 7)
+# ─────────────────────────────── Dislocation geometry ───────────────────────────────
 
-    complementary = ((ring_sizes[r1] == 5) & (ring_sizes[r2] == 7)) | \
-                    ((ring_sizes[r1] == 7) & (ring_sizes[r2] == 5))
-    is_paired = np.zeros(len(ring_sizes), dtype=bool)
-    is_paired[r1[complementary]] = True
-    is_paired[r2[complementary]] = True
-
-    both_non_hex = non_hex[r1] & non_hex[r2]
-    degree = np.bincount(
-        np.concatenate([r1[both_non_hex], r2[both_non_hex]]),
-        minlength=len(ring_sizes))
-
-    centroids = ring_centroid(ring_atoms, xy, Lx, Ly)
-
-    junction_mask = non_hex & (degree >= min_degree)
-    free_mask = non_hex & (~is_paired)
-
-    n_junctions = int(junction_mask.sum())
-    n_free_total = int(free_mask.sum())
-    junction_xy = centroids[junction_mask] % [Lx, Ly]
-    free_xy = centroids[free_mask] % [Lx, Ly]
-
-    result = {
-        "n_junctions": n_junctions, "n_free_total": n_free_total,
-        "junction_xy": junction_xy, "free_xy": free_xy,
-    }
-
-    if n_junctions == 0 or n_free_total == 0:
-        result.update(d_free=np.array([]), d_random=np.array([]),
-                       median_free=np.nan, median_random=np.nan, enrichment=np.nan)
-        return result
-
-    tree = cKDTree(junction_xy, boxsize=[Lx, Ly])
-    d_free, _ = tree.query(free_xy, k=1)
-
-    rng = np.random.default_rng(seed)
-    if n_random is None:
-        n_random = max(n_free_total, 200)
-    random_xy = np.column_stack([
-        rng.uniform(0, Lx, n_random), rng.uniform(0, Ly, n_random)])
-    d_random, _ = tree.query(random_xy, k=1)
-
-    median_free = float(np.median(d_free))
-    median_random = float(np.median(d_random))
-    enrichment = median_random / median_free if median_free > 0 else np.inf
-
-    result.update(d_free=d_free, d_random=d_random,
-                  median_free=median_free, median_random=median_random,
-                  enrichment=enrichment)
-    return result
+def dipole_separations(sizes, component, centroids, Lx, Ly):
+    '''
+    Distance between the 5 and the 7 of each isolated dislocation (component made of one 5 and one 7)
+    '''
+    idx = np.where(component >= 0)[0]
+    _, inv, counts = np.unique(component[idx], return_inverse=True, return_counts=True)
+    idx = idx[counts[inv] == 2]
+    idx = idx[np.argsort(component[idx], kind="stable")]
+    m1, m2 = idx[0::2], idx[1::2]
+    keep = sizes[m1] != sizes[m2]
+    return np.linalg.norm(min_image(centroids[m1[keep]] - centroids[m2[keep]], Lx, Ly), axis=1)
 
 
-def plot_junction_distance_distribution(d_free, d_random, title="", save_path=None):
-    """
-    Compare les distributions cumulees (ECDF) de d_free (disclinaisons
-    libres -> jonction la plus proche) et d_random (baseline CSR) --
-    d_free au-dessus de d_random = enrichissement pres des jonctions.
-    """
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6, 4.5))
-
-    for d, color, label in [(d_free, "tab:orange", "free disclinations"),
-                             (d_random, "tab:gray", "CSR baseline")]:
-        if len(d) == 0:
-            continue
-        d_sorted = np.sort(d)
-        ecdf = np.arange(1, len(d_sorted) + 1) / len(d_sorted)
-        ax.step(d_sorted, ecdf, where='post', color=color, label=label)
-
-    ax.set_xlabel(r"distance to nearest triple junction ($\mathrm{\AA}$)")
-    ax.set_ylabel("cumulative fraction")
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(alpha=0.3)
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
-
-
-def plot_triple_junction_map(junction_xy, free_xy, Lx, Ly, radius=None,
-                              title="", save_path=None):
-    """
-    Carte spatiale : jonctions triples (etoiles rouges), disclinaisons
-    libres (points oranges), et optionnellement le rayon de voisinage
-    utilise (cercles pointilles) -- pour verifier visuellement si les
-    points oranges s'accumulent bien autour des etoiles.
-    """
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(6.2, 5.5))
-
-    if len(free_xy) > 0:
-        ax.scatter(free_xy[:, 0], free_xy[:, 1], s=14, color="tab:orange",
-                   label="free disclinations", zorder=2)
-    if len(junction_xy) > 0:
-        ax.scatter(junction_xy[:, 0], junction_xy[:, 1], s=90, marker='*',
-                   color="tab:red", edgecolor='black', linewidth=0.5,
-                   label="triple junctions", zorder=3)
-        if radius is not None:
-            for jx, jy in junction_xy:
-                circle = plt.Circle((jx, jy), radius, fill=False,
-                                     ls=':', color='tab:red', alpha=0.4)
-                ax.add_patch(circle)
-
-    ax.set_xlim(0, Lx)
-    ax.set_ylim(0, Ly)
-    ax.set_xlabel(r"$x$ ($\mathrm{\AA}$)")
-    ax.set_ylabel(r"$y$ ($\mathrm{\AA}$)")
-    ax.set_title(title)
-    ax.set_aspect('equal')
-    ax.legend(loc='upper right', fontsize=8)
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150)
-        print(f"Figure sauvegardee: {save_path}")
-    return fig
-
-# ---------------------------------------------------------------------
-# 17) Tight-binding pz LDOS pres du point de Dirac (analogue STM/STS)
-# ---------------------------------------------------------------------
-#
-# Objectif : distinguer GB "ordonne" (paire de pics symetriques a basse
-# energie) vs GB "amorphe" (pic a energie nulle), Mesaros et al. PRB 82,
-# 205119 (2010). Reutilise directement nb_sorted/deg (deja calcules pour
-# les anneaux/la deformation locale) -- pas de nouvelle recherche de
-# voisins.
-#
-# A ~10^5 atomes, la diagonalisation exacte (meme en shift-invert autour
-# de E=0) est hors de portee : l'espacement des niveaux pres du point de
-# Dirac est ~bande passante/N, donc resoudre une fenetre de ~0.1-0.2 eV
-# demande des MILLIERS d'etats propres, et le cout d'eigsh croit bien
-# plus vite que lineairement avec k (verifie empiriquement : k=300 sur
-# un fichier de 117k atomes -> ~90s, et la resolution obtenue est encore
-# trop grossiere). La methode utilisee ici a la place est la Kernel
-# Polynomial Method (KPM, Weisse et al. Rev. Mod. Phys. 78, 275 (2006)) :
-# developpement de Chebyshev de la LDOS via uniquement des produits
-# matrice-vecteur creux (jamais de diagonalisation), en ne calculant la
-# LDOS qu'aux atomes "sondes" (GB + bulk echantillonnes) plutot qu'a
-# tous les atomes -- suffisant puisqu'on compare des spectres MOYENS
-# GB vs bulk, pas une carte complete.
-
-def build_tb_hamiltonian(xyz, nb_sorted, deg, Lx, Ly, t0=2.7, a0=1.42, beta=2.0):
-    """
-    Hamiltonien tight-binding pz (1 orbitale/atome, premiers voisins),
-    construit a partir du graphe de voisinage DEJA calcule par
-    build_neighbor_array (meme graphe que celui utilise pour anneaux/
-    is_defect/local_strain_field -- pas de nouvelle recherche cKDTree).
-
-    Hopping module par la longueur de liaison REELLE en 3D (xyz, donc
-    avec le flambage hors-plan pres des defauts inclus) :
-        t(d) = -t0 * (a0/d)^beta
-    Choix de modelisation (pas derive de l'AIREBO) -- la loi exponentielle
-    t(d) = -t0*exp(-beta_exp*(d/a0 - 1)) (beta_exp ~ 3.14, cf. litterature
-    contrainte/pseudo-champ-magnetique, Pereira et al.) est une alternative
-    courante, a comparer si les resultats sont sensibles a la forme choisie.
-
-    Inputs:
-        xyz : (N,3) positions (z = flambage hors-plan)
-        nb_sorted, deg : sortie de build_neighbor_array (memes xy, Lx, Ly)
-        Lx, Ly : taille de boite (periodique en x,y seulement -- pas de PBC en z)
+def size_correlation(centers, cluster_sizes, Lx, Ly, r_bins):
+    '''
+    C(r) = <(s_i - <s>)(s_j - <s>)> / var(s) over the pairs of defect clusters at distance r
     Outputs:
-        H     : (N,N) csr, symetrique, H_ij = t(d_ij) pour chaque liaison
-        pairs : (n_bonds, 3) = [i, j, d_ij] -- a inspecter pour verifier
-                que la distribution de d_ij ne deborde pas vers les
-                secondes voisines (~2.46 A en graphene pristine)
-    """
-    N = xyz.shape[0]
-    xy = xyz[:, :2]
-    max_deg = nb_sorted.shape[1]
-
-    ii = np.repeat(np.arange(N), max_deg)
-    jj = nb_sorted.ravel()
-    valid = jj >= 0
-    ii, jj = ii[valid], jj[valid]
-    keep = ii < jj                      # chaque liaison une seule fois
-    ii, jj = ii[keep], jj[keep]
-
-    dx = xy[ii, 0] - xy[jj, 0]
-    dy = xy[ii, 1] - xy[jj, 1]
-    dx -= Lx * np.round(dx / Lx)
-    dy -= Ly * np.round(dy / Ly)
-    dz = xyz[ii, 2] - xyz[jj, 2]        # pas de PBC en z (feuillet, pas un volume)
-    d = np.sqrt(dx * dx + dy * dy + dz * dz)
-
-    t = -t0 * (a0 / d) ** beta
-
-    row = np.concatenate([ii, jj])
-    col = np.concatenate([jj, ii])
-    val = np.concatenate([t, t])
-    H = coo_matrix((val, (row, col)), shape=(N, N)).tocsr()
-    pairs = np.column_stack([ii, jj, d])
-    return H, pairs
+        C : (n_bins,), NaN for empty bins
+        n_pairs : (n_bins,)
+    '''
+    if len(centers) < 2:
+        return np.full(len(r_bins) - 1, np.nan), np.zeros(len(r_bins) - 1, dtype=int)
+    xy = wrap(centers, Lx, Ly)
+    pairs = cKDTree(xy, boxsize=[Lx, Ly]).query_pairs(r_bins[-1], output_type="ndarray")
+    r = np.linalg.norm(min_image(xy[pairs[:, 0]] - xy[pairs[:, 1]], Lx, Ly), axis=1)
+    ds = cluster_sizes - cluster_sizes.mean()
+    n_pairs = np.histogram(r, r_bins)[0]
+    s = np.histogram(r, r_bins, weights=ds[pairs[:, 0]] * ds[pairs[:, 1]])[0]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        C = s / n_pairs / cluster_sizes.var()
+    return C, n_pairs
 
 
-def estimate_spectral_bounds(H, pad=0.05):
-    """
-    Borne de Gershgorin (rayon spectral <= max_i sum_j |H_ij|, diagonale
-    nulle ici) -- volontairement conservatrice pour eviter tout
-    depassement de [-1,1] apres rescaling (ce qui ferait diverger la
-    recursion de Chebyshev), au prix d'une resolution KPM legerement
-    reduite par rapport a une borne serree (Lanczos a quelques pas).
-    Retourne (a, b) tels que H_tilde = (H - b*I) / a ait un spectre
-    dans [-1+pad, 1-pad].
-    """
-    row_abs_sum = np.abs(H).sum(axis=1)
-    row_abs_sum = np.asarray(row_abs_sum).ravel()
-    lam_max = row_abs_sum.max()
-    lam_min = -lam_max                  # H est bipartite (sous-reseaux A/B), spectre symetrique
-    a = (lam_max - lam_min) / 2.0 / (1.0 - pad)
-    b = (lam_max + lam_min) / 2.0
-    return float(a), float(b)
+def junction_enrichment(junctions, free, Lx, Ly, seed = 0):
+    '''
+    Distance of the free disclinations to the nearest triple junction, compared with uniformly random
+    points: median(d_random) / median(d_free) > 1 means free disclinations gather near the junctions
+    '''
+    if len(junctions) == 0 or len(free) == 0:
+        return np.nan
+    tree = cKDTree(wrap(junctions, Lx, Ly), boxsize=[Lx, Ly])
+    rand = np.random.default_rng(seed).random((max(len(free), 200), 2)) * [Lx, Ly]
+    return float(np.median(tree.query(rand)[0]) / np.median(tree.query(wrap(free, Lx, Ly))[0]))
 
 
-def jackson_kernel(n_moments):
-    """ Noyau de Jackson (attenue les oscillations de Gibbs du tronquage). """
-    n = np.arange(n_moments)
-    M = n_moments
-    g = ((M - n + 1) * np.cos(np.pi * n / (M + 1))
-         + np.sin(np.pi * n / (M + 1)) / np.tan(np.pi / (M + 1))) / (M + 1)
-    return g
+# ─────────────────────────────── Strain and smoothed maps ───────────────────────────────
+
+def shear_strain(xyz, bonds, Lx, Ly):
+    '''
+    Anisotropy of the in-plane bond tensor Q = sum_bonds b b of each atom,
+    sqrt((Qxx - Qyy)^2 + 4 Qxy^2) / (Qxx + Qyy): 0 for three equal bonds at 120 deg
+    '''
+    N = len(xyz)
+    d = bond_vectors(xyz, bonds, Lx, Ly)
+    ends = np.r_[bonds[:, 0], bonds[:, 1]]
+    dx, dy = np.r_[d[:, 0], d[:, 0]], np.r_[d[:, 1], d[:, 1]]
+    qxx = np.bincount(ends, dx * dx, minlength=N)
+    qyy = np.bincount(ends, dy * dy, minlength=N)
+    qxy = np.bincount(ends, dx * dy, minlength=N)
+    return np.sqrt((qxx - qyy) ** 2 + 4 * qxy ** 2) / (qxx + qyy)
 
 
-def kpm_moments(H, probe_idx, n_moments=1024, a=None, b=None, pad=0.05, verbose=False):
-    """
-    Moments de Chebyshev mu_n(i) = <i| T_n(H_tilde) |i> pour chaque atome
-    i dans probe_idx, calcules simultanement pour tous les atomes sondes
-    (les vecteurs de depart e_i sont empiles en colonnes -- un seul jeu
-    de produits matrice-dense suffit pour tous les atomes sondes a la fois).
-    Cout : ~n_moments produits matrice(NxN, creuse)-matrice(N x n_probes,
-    dense), soit O(n_moments * nnz(H) * n_probes) -- lineaire en
-    n_moments et en n_probes, INDEPENDANT du cout (bien pire, super-
-    lineaire) d'une diagonalisation.
+def smooth_map(xy, Lx, Ly, values = None, n_grid = 128, sigma = 25.0):
+    '''
+    Local average of a per-atom quantity (local atom density if values is None) on an n_grid x n_grid
+    grid, with a periodic Gaussian kernel of width sigma (AA)
+    '''
+    rng = [[0, Lx], [0, Ly]]
+    count = np.histogram2d(xy[:, 0], xy[:, 1], bins=n_grid, range=rng)[0]
+    s = (sigma * n_grid / Lx, sigma * n_grid / Ly)
+    count = gaussian_filter(count, s, mode="wrap")
+    if values is None:
+        return count
+    total = gaussian_filter(np.histogram2d(xy[:, 0], xy[:, 1], bins=n_grid, range=rng, weights=values)[0], s, mode="wrap")
+    return total / np.maximum(count, 1e-12)
 
-    Inputs:
-        H : sortie de build_tb_hamiltonian
-        probe_idx : (n_probes,) indices des atomes dont on veut la LDOS
-        n_moments : ordre du developpement -- fixe la resolution en energie
-                    (~ pi*a/n_moments apres rescaling, cf. Weisse et al. 2006)
+
+# ─────────────────────────────── Diffraction ───────────────────────────────
+
+@njit(parallel=True, cache=True)
+def structure_factor(xy, q):
+    '''
+    S(q) = |sum_i exp(i q.r_i)|^2 / N for each wave vector q (n_q, 2)
+    '''
+    out = np.empty(len(q))
+    for t in prange(len(q)):
+        re = 0.0
+        im = 0.0
+        for i in range(len(xy)):
+            ph = q[t, 0] * xy[i, 0] + q[t, 1] * xy[i, 1]
+            re += np.cos(ph)
+            im += np.sin(ph)
+        out[t] = (re * re + im * im) / len(xy)
+    return out
+
+
+def first_peak(xy, Lx, Ly, n_theta = 720, n_q = 300, q_window = 0.3):
+    '''
+    First diffraction ring. Its radius is first estimated from the atom density, the angular profile
+    S(theta) on that circle gives the direction of the strongest peak, the radial profile along it
+    gives the exact radius q0 and the radial width (intensity-weighted std around the maximum,
+    translational order), and the angular profile at q0 gives |m6| = |sum S exp(6 i theta)| / sum S
+    (orientational order)
+    '''
+    a_cc = np.sqrt(Lx * Ly / len(xy) / (3 * np.sqrt(3) / 4))
+    q_mag = 4 * np.pi / (3 * a_cc)
+    theta = np.arange(n_theta) * 2 * np.pi / n_theta
+    circle = np.stack([np.cos(theta), np.sin(theta)], axis=1)
+    direction = circle[np.argmax(structure_factor(xy, q_mag * circle))]
+
+    q = np.linspace(q_mag * (1 - q_window), q_mag * (1 + q_window), n_q)
+    S_radial = structure_factor(xy, q[:, None] * direction)
+    q0 = q[np.argmax(S_radial)]
+    width = np.sqrt(np.sum(S_radial * (q - q0) ** 2) / S_radial.sum())
+
+    S_ring = structure_factor(xy, q0 * circle)
+    m6 = abs(np.sum(S_ring * np.exp(6j * theta)) / S_ring.sum())
+    return dict(q0=q0, m6=m6, radial_width=width, theta=theta, S_ring=S_ring, q=q, S_radial=S_radial)
+
+
+def diffraction_map(xy, Lx, Ly, q_max, n_grid = 2048):
+    '''
+    |FFT|^2 of the atom density binned on n_grid x n_grid, cropped to |qx|, |qy| <= q_max
     Outputs:
-        mu : (n_probes, n_moments)
-        a, b : bornes utilisees pour le rescaling (a reutiliser pour la
-               reconstruction -- kpm_reconstruct_ldos)
-    """
-    if a is None or b is None:
-        a, b = estimate_spectral_bounds(H, pad=pad)
-
-    N = H.shape[0]
-    n_probes = len(probe_idx)
-    Htilde = (H - b * coo_matrix((np.ones(N), (np.arange(N), np.arange(N))),
-                                  shape=(N, N)).tocsr()) / a
-
-    T_prev = np.zeros((N, n_probes))
-    T_prev[probe_idx, np.arange(n_probes)] = 1.0     # |T_0> = |i>
-    T_curr = Htilde @ T_prev                          # |T_1> = Htilde|i>
-
-    mu = np.empty((n_probes, n_moments))
-    mu[:, 0] = T_prev[probe_idx, np.arange(n_probes)]
-    mu[:, 1] = T_curr[probe_idx, np.arange(n_probes)]
-
-    for n in range(2, n_moments):
-        T_next = 2.0 * (Htilde @ T_curr) - T_prev
-        mu[:, n] = T_next[probe_idx, np.arange(n_probes)]
-        T_prev, T_curr = T_curr, T_next
-        if verbose and n % 200 == 0:
-            print(f"  KPM moment {n}/{n_moments}")
-
-    return mu, a, b
+        S (n_qx, n_qy), qx, qy
+    '''
+    hist = np.histogram2d(xy[:, 0], xy[:, 1], bins=n_grid, range=[[0, Lx], [0, Ly]])[0]
+    S = np.abs(np.fft.fftshift(np.fft.fft2(hist))) ** 2 / len(xy)
+    qx = np.fft.fftshift(np.fft.fftfreq(n_grid, Lx / n_grid)) * 2 * np.pi
+    qy = np.fft.fftshift(np.fft.fftfreq(n_grid, Ly / n_grid)) * 2 * np.pi
+    ix, iy = np.abs(qx) <= q_max, np.abs(qy) <= q_max
+    return S[np.ix_(ix, iy)], qx[ix], qy[iy]
 
 
-def kpm_reconstruct_ldos(mu, a, b, e_grid, n_moments=None):
-    """
-    Reconstruit LDOS(atome, E) sur e_grid a partir des moments de
-    Chebyshev (noyau de Jackson applique pour limiter les oscillations
-    de troncature) :
-        rho(E) = 1/(a*pi*sqrt(1-x^2)) * [g0*mu0 + 2*sum_{n>=1} gn*mu_n*T_n(x)]
-        x = (E - b) / a
-    Inputs:
-        mu : (n_probes, n_moments), sortie de kpm_moments
-        a, b : memes bornes que kpm_moments
-        e_grid : (n_e,) energies (eV) ou evaluer la LDOS
-    Output:
-        ldos : (n_probes, n_e)
-    """
-    if n_moments is None:
-        n_moments = mu.shape[1]
-    g = jackson_kernel(n_moments)
+# ─────────────────────────────── Tight-binding LDOS (KPM) ───────────────────────────────
 
-    x = (e_grid - b) / a
-    x_clip = np.clip(x, -1 + 1e-10, 1 - 1e-10)
-    theta = np.arccos(x_clip)                          # (n_e,)
-    n = np.arange(n_moments)[:, None]                  # (n_moments,1)
-    Tn = np.cos(n * theta[None, :])                     # (n_moments, n_e)
-
-    weighted_mu = (g[:, None] * mu.T)                   # (n_moments, n_probes)
-    weighted_mu[0, :] *= 0.5                             # le terme n=0 compte une fois, pas deux
-    coeffs = 2.0 * weighted_mu                           # (n_moments, n_probes)
-
-    ldos = (coeffs.T @ Tn) / (a * np.pi * np.sin(theta)[None, :])   # (n_probes, n_e)
-    return ldos
-
-
-def kpm_window_weight(mu, a, b, e_window=0.15, n_e=800, n_moments=None):
-    """
-    Poids LDOS integre dans [-e_window, e_window], par atome sonde --
-    equivalent KPM de zero_energy_peak_metric. Reconstruit sur une
-    grille locale fine puis integre par trapezes (plus simple a
-    verifier que l'integrale analytique des T_n, largement suffisant
-    en precision pour une fenetre aussi etroite).
-    """
-    e_grid = np.linspace(-e_window, e_window, n_e)
-    ldos = kpm_reconstruct_ldos(mu, a, b, e_grid, n_moments=n_moments)
-    trapz = getattr(np, "trapezoid", None) or np.trapz   # numpy>=2.0 renamed trapz -> trapezoid
-    return trapz(ldos, e_grid, axis=1)                   # (n_probes,)
-
-
-def kpm_moments_torch(H, probe_idx, n_moments=1024, a=None, b=None, pad=0.05,
-                       device=None, dtype=None, verbose=False):
-    """
-    Meme algorithme/meme resultat que kpm_moments, mais les produits
-    matrice creuse x matrice dense tournent sur GPU via PyTorch (cuSPARSE) --
-    utile pour balayer beaucoup de fichiers (T,k) a la suite plutot que
-    d'attendre le chemin CPU/scipy (~100s/fichier a 128 sondes/classe et
-    512 moments, mesure sur un fichier ~117k atomes -- voir kpm_moments).
-    Interface de sortie identique (mu en numpy) : kpm_reconstruct_ldos /
-    kpm_window_weight s'utilisent sans modification derriere.
-
-    NOTE : chemin non teste dans cet environnement (pas de GPU/torch ici) --
-    l'algorithme est le meme que la version numpy validee sur tes fichiers,
-    mais verifie le premier resultat contre kpm_moments (backend='numpy')
-    sur un petit cas avant de t'y fier pour une campagne complete.
-
-    Deux details de perf qui comptent ici (contrairement a la version numpy,
-    ou ils ne changent rien) :
-      - format CSR (pas COO) pour le sparse-dense matmul -- torch.sparse.mm
-        est nettement plus rapide en CSR sur GPU ;
-      - AUCUN .cpu() dans la boucle -- chaque appel .cpu() est un point de
-        synchronisation qui vide le pipeline GPU, et on en ferait un par
-        moment (donc n_moments fois). On accumule mu entierement sur le
-        device et on ne rapatrie qu'UNE fois a la fin.
-    """
+def kpm_ldos(xyz, bonds, Lx, Ly, probes, e_grid, n_moments = 512, e_window = 0.15, t0 = 2.7, beta = 2.0):
+    '''
+    pz tight-binding LDOS of the probe atoms by the kernel polynomial method (Chebyshev moments with
+    the Jackson kernel, Weisse et al. RMP 78, 275 (2006)), on the GPU when available.
+    Hopping t(d) = -t0 (A_CC / d)^beta with the 3D length d of each bond.
+    Outputs:
+        ldos : (n_probes, n_e) on e_grid
+        weight : (n_probes,) integral of the LDOS over |E| < e_window
+    '''
     import torch
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    if dtype is None:
-        # float32 sur GPU : largement suffisant (le noyau de Jackson etouffe
-        # de toute facon les hautes frequences/le bruit numerique des derniers
-        # moments) et nettement plus rapide/leger en memoire sur une RTX 3060
-        # que float64. En CPU on garde float64 (pas de gain a passer en 32 bits).
-        dtype = torch.float64 if device == "cpu" else torch.float32
+    N, P = len(xyz), len(probes)
+    t = -t0 * (A_CC / np.linalg.norm(bond_vectors(xyz, bonds, Lx, Ly), axis=1)) ** beta
+    H = coo_matrix((np.r_[t, t], (np.r_[bonds[:, 0], bonds[:, 1]], np.r_[bonds[:, 1], bonds[:, 0]])), shape=(N, N)).tocsr()
+    a = 1.05 * np.abs(H).sum(axis=1).max()              # Gershgorin bound: spectrum within [-a, a]
+    H = H / a
 
-    if a is None or b is None:
-        a, b = estimate_spectral_bounds(H, pad=pad)
-
-    N = H.shape[0]
-    n_probes = len(probe_idx)
-
-    H_scaled_scipy = (H / a).tocsr()                     # H_scaled = H/a, format CSR
-    crow = torch.tensor(H_scaled_scipy.indptr, dtype=torch.int64, device=device)
-    col = torch.tensor(H_scaled_scipy.indices, dtype=torch.int64, device=device)
-    val = torch.tensor(H_scaled_scipy.data, dtype=dtype, device=device)
-    # Les deux UserWarning que torch souleve ici (API CSR sparse encore en beta,
-    # checks d'invariants desactives par defaut) sont connues et sans consequence
-    # pour cet usage (matrice construite une fois depuis un scipy CSR deja valide,
-    # donc deja garantie coherente) -- supprimees pour ne pas polluer les logs
-    # d'un balayage sur ~100 fichiers. N'affecte aucun autre warning.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float32 if device == "cuda" else torch.float64
     with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="Sparse invariant checks")
-        warnings.filterwarnings("ignore", message="Sparse CSR tensor support")
-        H_scaled = torch.sparse_csr_tensor(crow, col, val, size=(N, N))
-    b_over_a = float(b) / float(a)
-
-    probe_t = torch.tensor(probe_idx, dtype=torch.long, device=device)
-    col_t = torch.arange(n_probes, device=device)
-
-    T_prev = torch.zeros((N, n_probes), dtype=dtype, device=device)
-    T_prev[probe_t, col_t] = 1.0
-    T_curr = torch.sparse.mm(H_scaled, T_prev) - b_over_a * T_prev
-
-    mu_dev = torch.empty((n_probes, n_moments), dtype=dtype, device=device)
-    mu_dev[:, 0] = T_prev[probe_t, col_t]
-    mu_dev[:, 1] = T_curr[probe_t, col_t]
-
+        warnings.simplefilter("ignore", UserWarning)              # sparse CSR support flagged as beta
+        Ht = torch.sparse_csr_tensor(torch.tensor(H.indptr, dtype=torch.int64), torch.tensor(H.indices, dtype=torch.int64),
+                                     torch.tensor(H.data, dtype=dtype), size=(N, N), device=device)
+    rows, cols = torch.tensor(probes, device=device), torch.arange(P, device=device)
+    T0 = torch.zeros((N, P), dtype=dtype, device=device)
+    T0[rows, cols] = 1.0
+    T1 = Ht @ T0
+    mu = torch.empty((n_moments, P), dtype=dtype, device=device)
+    mu[0], mu[1] = T0[rows, cols], T1[rows, cols]
     for n in range(2, n_moments):
-        T_next = 2.0 * (torch.sparse.mm(H_scaled, T_curr) - b_over_a * T_curr) - T_prev
-        mu_dev[:, n] = T_next[probe_t, col_t]
-        T_prev, T_curr = T_curr, T_next
-        if verbose and n % 200 == 0:
-            print(f"  KPM moment {n}/{n_moments} (torch/{device})")
+        T0, T1 = T1, 2 * (Ht @ T1) - T0
+        mu[n] = T1[rows, cols]
+    mu = mu.double().cpu().numpy()
 
-    mu = mu_dev.to(torch.float64).cpu().numpy()           # UN SEUL transfert, a la fin
-    return mu, a, b
+    M = n_moments
+    n = np.arange(M)
+    g = ((M - n + 1) * np.cos(np.pi * n / (M + 1)) + np.sin(np.pi * n / (M + 1)) / np.tan(np.pi / (M + 1))) / (M + 1)
+    coeff = g[:, None] * mu * np.where(n == 0, 1.0, 2.0)[:, None]
+
+    def reconstruct(e):
+        th = np.arccos(np.clip(e / a, -1 + 1e-10, 1 - 1e-10))
+        return (np.cos(n[:, None] * th[None]).T @ coeff).T / (np.pi * a * np.sin(th))
+
+    e_w = np.linspace(-e_window, e_window, 801)
+    return reconstruct(e_grid), np.trapezoid(reconstruct(e_w), e_w, axis=1)
 
 
-def ldos_gb_vs_bulk(xyz, nb_sorted, deg, Lx, Ly, is_defect,
-                     n_probes_per_class=256, n_moments=1024,
-                     e_grid=None, e_window=0.15, t0=2.7, a0=1.42, beta=2.0,
-                     seed=None, backend="numpy", verbose=False):
-    """
-    Fonction "tout-en-un" pour un fichier T_*_k_*.npz : construit H,
-    echantillonne des atomes GB (is_defect) et bulk (~is_defect),
-    calcule leurs moments KPM en un seul passage (memes produits
-    matrice-vecteur pour les deux classes -- le cout ne depend que du
-    nombre TOTAL d'atomes sondes, pas de la repartition GB/bulk), puis
-    retourne spectres moyens + poids a energie nulle par classe.
+# ─────────────────────────────── Batch over a folder ───────────────────────────────
 
-    Output: dict avec
-        e_grid, gb_spectrum, bulk_spectrum (moyennes sur les atomes sondes),
-        gb_zero_E_weight, bulk_zero_E_weight (moyenne +/- std sur les
-        atomes sondes de chaque classe),
-        a, b (bornes spectrales utilisees), pairs (pour QC des longueurs
-        de liaison, cf. build_tb_hamiltonian)
-    """
-    if e_grid is None:
-        e_grid = np.linspace(-1.0, 1.0, 400)
+def run_folder(folder, analyze, **kwargs):
+    '''
+    analyze(path, maps, **kwargs) -> dict for every crystal of the folder; maps is True for the first
+    k of each temperature (spatial maps are only computed for one crystal per T)
+    Output:
+        {T: [result of each k]}, sorted by T
+    '''
+    results = defaultdict(list)
+    for T, k, path in crystal_files(folder):
+        res = analyze(path, maps=not results[T], **kwargs)
+        res["k"] = k
+        results[T].append(res)
+        print(f"T={T} K k={k}  " + "  ".join(f"{key}={v:.4g}" for key, v in res.items() if np.isscalar(v) and key != "k"))
+    return dict(results)
 
-    rng = np.random.default_rng(seed)
-    gb_pool = np.where(is_defect)[0]
-    bulk_pool = np.where(~is_defect)[0]
-    n_gb = min(n_probes_per_class, len(gb_pool))
-    n_bulk = min(n_probes_per_class, len(bulk_pool))
-    gb_idx = rng.choice(gb_pool, size=n_gb, replace=False)
-    bulk_idx = rng.choice(bulk_pool, size=n_bulk, replace=False)
-    probe_idx = np.concatenate([gb_idx, bulk_idx])
 
-    H, pairs = build_tb_hamiltonian(xyz, nb_sorted, deg, Lx, Ly, t0=t0, a0=a0, beta=beta)
-    a, b = estimate_spectral_bounds(H)
-    if backend == "torch":
-        mu, a, b = kpm_moments_torch(H, probe_idx, n_moments=n_moments, a=a, b=b, verbose=verbose)
-    else:
-        mu, a, b = kpm_moments(H, probe_idx, n_moments=n_moments, a=a, b=b, verbose=verbose)
+def mean_std(results, key):
+    '''
+    Temperatures, mean and std over k of a scalar result
+    '''
+    T = np.array(list(results))
+    vals = [np.array([r[key] for r in results[t]], dtype=float) for t in T]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)          # all-NaN temperatures
+        return T, np.array([np.nanmean(v) for v in vals]), np.array([np.nanstd(v) for v in vals])
 
-    mu_gb, mu_bulk = mu[:n_gb], mu[n_gb:]
-    ldos_gb = kpm_reconstruct_ldos(mu_gb, a, b, e_grid)
-    ldos_bulk = kpm_reconstruct_ldos(mu_bulk, a, b, e_grid)
 
-    w_gb = kpm_window_weight(mu_gb, a, b, e_window=e_window)
-    w_bulk = kpm_window_weight(mu_bulk, a, b, e_window=e_window)
+def plot_vs_T(results, panels, path):
+    '''
+    One panel per (title, ylabel, [(key, label), ...]), mean +/- std over k; saved as path.png/.pdf
+    '''
+    fig, axes = plt.subplots(1, len(panels), figsize=(5.5 * len(panels), 4.5), squeeze=False)
+    for ax, (title, ylabel, curves) in zip(axes[0], panels):
+        for key, label in curves:
+            T, m, s = mean_std(results, key)
+            ax.errorbar(T, m, yerr=s, marker="o", ms=4, capsize=3, label=label)
+        ax.set(xlabel=r"$T$ (K)", ylabel=ylabel, title=title)
+        if len(curves) > 1:
+            ax.legend()
+        ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(f"{path}.pdf")
+    fig.savefig(f"{path}.png", dpi=150)
+    plt.close(fig)
 
-    return {
-        "e_grid": e_grid,
-        "gb_spectrum": ldos_gb.mean(axis=0), "gb_spectrum_std": ldos_gb.std(axis=0),
-        "bulk_spectrum": ldos_bulk.mean(axis=0), "bulk_spectrum_std": ldos_bulk.std(axis=0),
-        "gb_zero_E_weight": float(w_gb.mean()), "gb_zero_E_weight_std": float(w_gb.std()),
-        "bulk_zero_E_weight": float(w_bulk.mean()), "bulk_zero_E_weight_std": float(w_bulk.std()),
-        "a": a, "b": b, "pairs": pairs,
-    }
 
-def ldos_paired_vs_free(xyz, nb_sorted, deg, Lx, Ly, ring_sizes, ring_atoms,
-                         n_probes_per_class=128, n_moments=1024,
-                         e_grid=None, e_window=0.15, t0=2.7, a0=1.42, beta=2.0,
-                         seed=None, backend="numpy", verbose=False):
-    """
-    Meme mecanique KPM que ldos_gb_vs_bulk, mais la separation en deux
-    classes d'atomes sondes est topologique plutot que geometrique :
-    dislocation liee (paire 5-7 adjacente, is_paired) vs disclinaison
-    libre (is_free) -- exactement la distinction que la transition
-    KTHNY est censee controler (liee -> attendu hexatique/ordonne,
-    libre -> attendu liquide/desordonne), au lieu du simple "est-ce un
-    defaut" (GB vs bulk) qui mélange les deux regimes a tout T.
-    Reutilise classify_dislocations / defect_type_atom_masks (deja
-    dans ce fichier, section anneaux) -- pas de nouveau calcul geometrique.
+def save_vs_T(results, keys, path):
+    '''
+    T, <key>_mean and <key>_std for each scalar key
+    '''
+    out = {}
+    for key in keys:
+        out["T"], out[f"{key}_mean"], out[f"{key}_std"] = mean_std(results, key)
+    np.savez(path, **out)
 
-    Retourne None si l'une des deux classes est vide sur ce fichier
-    (peut arriver a T tres bas : quasiment pas de disclinaisons libres
-    attendu en regime hexatique) -- a filtrer cote appelant.
-    """
-    N = xyz.shape[0]
-    is_paired = classify_dislocations(ring_sizes, ring_atoms)
-    is_paired_atom, is_free_atom = defect_type_atom_masks(N, ring_sizes, ring_atoms, is_paired)
 
-    if e_grid is None:
-        e_grid = np.linspace(-1.0, 1.0, 400)
-
-    rng = np.random.default_rng(seed)
-    paired_pool = np.where(is_paired_atom)[0]
-    free_pool = np.where(is_free_atom)[0]
-    if len(paired_pool) == 0 or len(free_pool) == 0:
-        return None
-
-    n_paired = min(n_probes_per_class, len(paired_pool))
-    n_free = min(n_probes_per_class, len(free_pool))
-    paired_idx = rng.choice(paired_pool, size=n_paired, replace=False)
-    free_idx = rng.choice(free_pool, size=n_free, replace=False)
-    probe_idx = np.concatenate([paired_idx, free_idx])
-
-    H, pairs = build_tb_hamiltonian(xyz, nb_sorted, deg, Lx, Ly, t0=t0, a0=a0, beta=beta)
-    a, b = estimate_spectral_bounds(H)
-    if backend == "torch":
-        mu, a, b = kpm_moments_torch(H, probe_idx, n_moments=n_moments, a=a, b=b, verbose=verbose)
-    else:
-        mu, a, b = kpm_moments(H, probe_idx, n_moments=n_moments, a=a, b=b, verbose=verbose)
-
-    mu_paired, mu_free = mu[:n_paired], mu[n_paired:]
-    ldos_paired = kpm_reconstruct_ldos(mu_paired, a, b, e_grid)
-    ldos_free = kpm_reconstruct_ldos(mu_free, a, b, e_grid)
-
-    w_paired = kpm_window_weight(mu_paired, a, b, e_window=e_window)
-    w_free = kpm_window_weight(mu_free, a, b, e_window=e_window)
-
-    return {
-        "e_grid": e_grid,
-        "paired_spectrum": ldos_paired.mean(axis=0), "paired_spectrum_std": ldos_paired.std(axis=0),
-        "free_spectrum": ldos_free.mean(axis=0), "free_spectrum_std": ldos_free.std(axis=0),
-        "paired_zero_E_weight": float(w_paired.mean()), "paired_zero_E_weight_std": float(w_paired.std()),
-        "free_zero_E_weight": float(w_free.mean()), "free_zero_E_weight_std": float(w_free.std()),
-        "n_paired_atoms": int(is_paired_atom.sum()), "n_free_atoms": int(is_free_atom.sum()),
-        "a": a, "b": b, "pairs": pairs,
-    }
+def plot_maps(results, key, folder, cmap = "inferno", symmetric = False, label = ""):
+    '''
+    The map `key` of the first k of each temperature (box size in the result as "box"), with a common
+    color scale, as folder/T=<T>K.png
+    '''
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    maps = {T: r[0] for T, r in results.items() if key in r[0]}
+    vals = np.concatenate([m[key].ravel() for m in maps.values()])
+    vmax = np.percentile(np.abs(vals) if symmetric else vals, 99)
+    for T, m in maps.items():
+        Lx, Ly = m["box"]
+        fig, ax = plt.subplots(figsize=(6, 5.2))
+        im = ax.imshow(m[key].T, origin="lower", extent=[0, Lx, 0, Ly], cmap=cmap,
+                       vmin=-vmax if symmetric else None, vmax=vmax)
+        ax.set(xlabel=r"$x$ ($\mathrm{\AA}$)", ylabel=r"$y$ ($\mathrm{\AA}$)", title=f"T = {T} K (k = {m['k']})")
+        fig.colorbar(im, ax=ax, label=label)
+        fig.tight_layout()
+        fig.savefig(folder / f"T={T}K.png", dpi=150)
+        plt.close(fig)

@@ -5626,3 +5626,7 @@ Spe/Vibrational/T=10000_k=1_thermalized_300K_fix_unfix_z.npz
 Spe/Vibrational/T=10000_k=1_thermalized_300K_fix_z.npz
 TP2/Simulation/__pycache__/Observables.cpython-311.pyc
 Spe/Vibrational/plot_thermalize.sbatch
+
+# Python / LAMMPS artefacts
+__pycache__/
+log.lammps

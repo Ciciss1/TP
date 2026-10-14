@@ -1,82 +1,60 @@
+"""
+Thermalise the crystals T=<T>K_k=<k>.npz of a folder (one k) at a physical temperature, in parallel,
+and save the trajectories as <output>/T=<T>K_k=<k>_thermalized_<T_md>K.npz (existing files skipped).
+
+Usage:
+    python sweep_thermalize.py <crystal folder> <output folder> [--k 1] [--T 300] [--workers 9] [--threads 8] [--lmp lmp]
+"""
 import re
+import argparse
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
+
 from thermalize import Thermalizer
 
-RUSLAN_DIR = Path("/scratch/escarmel/crystal_big_grains/")
-FOLDERS = ["eps=0/L=565.7/rho=0.00015626"]
-K_INDEX = 1
-
-OUTPUT_DIR = Path("/scratch/escarmel/thermalize_results_rho_0.00015626")
-
-T_KELVIN = 300
 EQUIL_CHECK_PS = 2.0
 EQUIL_MAX_PS = 20.0
 PE_TOL = 0.005
 PROD_PS = 5.0
 AIREBO_FILE = "CH.airebo"
 
-THREADS_PER_WORKER = 8
-N_WORKERS = 9
 
-
-def find_crystals(folder: Path, k_index: int):
-    pattern = re.compile(rf"T=(\d+)K?_k={k_index}\.npz$")
-    found = []
-    for f in folder.glob(f"T=*_k={k_index}.npz"):
-        m = pattern.match(f.name)
-        if m:
-            found.append((int(m.group(1)), f))
-    return sorted(found, key=lambda x: x[0])
-
-
-def process_one(T_mc, path, out_path):
-    thermalizer = Thermalizer(airebo_file=AIREBO_FILE, n_threads=THREADS_PER_WORKER)
-
-    data = np.load(path)
-    if "atoms" in data.files:
-        atoms = data["atoms"]
-    else:
-        atoms = data["xyz"]
-    if "lattice" in data.files:
-        Lx, Ly = data["lattice"]
-    else:
-        Lx = Ly = data["L"]
-
-    result = thermalizer.run(
-        atoms, Lx, Ly, T=T_KELVIN,
-        equil_check_ps=EQUIL_CHECK_PS, equil_max_ps=EQUIL_MAX_PS, pe_tol=PE_TOL,
-        prod_ps=PROD_PS,
-    )
-    result.save(str(out_path))
-    return T_mc, result.converged
+def process(path, out_path, T, threads, lmp):
+    d = np.load(path)
+    Lx, Ly = d["lattice"]
+    result = Thermalizer(AIREBO_FILE, threads, lmp=lmp).run(
+        d["atoms"], Lx, Ly, T=T, equil_check_ps=EQUIL_CHECK_PS, equil_max_ps=EQUIL_MAX_PS, pe_tol=PE_TOL, prod_ps=PROD_PS)
+    result.save(out_path)
+    return result.converged
 
 
 if __name__ == "__main__":
-    for folder_name in FOLDERS:
-        src_folder = RUSLAN_DIR / folder_name
-        dst_folder = OUTPUT_DIR / folder_name
-        dst_folder.mkdir(parents=True, exist_ok=True)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("folder")
+    ap.add_argument("output")
+    ap.add_argument("--k", type=int, default=1)
+    ap.add_argument("--T", type=float, default=300.0, help="MD temperature (K)")
+    ap.add_argument("--workers", type=int, default=9)
+    ap.add_argument("--threads", type=int, default=8, help="OpenMP threads per LAMMPS run")
+    ap.add_argument("--lmp", default="lmp")
+    args = ap.parse_args()
 
-        crystals = find_crystals(src_folder, K_INDEX)
-        print(f"\n### {folder_name} : {len(crystals)} temperatures (k={K_INDEX}) ###")
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
+    todo = []
+    for path in sorted(Path(args.folder).glob(f"T=*K_k={args.k}.npz"), key=lambda p: int(re.search(r"T=(\d+)", p.name).group(1))):
+        out_path = out / f"{path.stem}_thermalized_{args.T:.0f}K.npz"
+        if out_path.exists():
+            print(f"{path.name}: already done")
+        else:
+            todo.append((path, out_path))
 
-        todo = []
-        for T_mc, path in crystals:
-            out_path = dst_folder / f"T={T_mc}_k={K_INDEX}_thermalized_{int(T_KELVIN)}K.npz"
-            if out_path.exists():
-                print(f"  T={T_mc} : deja fait, skip")
-                continue
-            todo.append((T_mc, path, out_path))
-
-        with ProcessPoolExecutor(max_workers=N_WORKERS) as executor:
-            futures = {executor.submit(process_one, *args): args[0] for args in todo}
-            for future in as_completed(futures):
-                T_mc = futures[future]
-                try:
-                    T_mc, converged = future.result()
-                    print(f"  T={T_mc} : termine, converged={converged}")
-                except Exception as e:
-                    print(f"  T={T_mc} : ECHEC — {e}")
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        futures = {pool.submit(process, p, o, args.T, args.threads, args.lmp): p.name for p, o in todo}
+        for fut in as_completed(futures):
+            try:
+                print(f"{futures[fut]}: done, converged = {fut.result()}")
+            except Exception as err:
+                print(f"{futures[fut]}: FAILED {err}")

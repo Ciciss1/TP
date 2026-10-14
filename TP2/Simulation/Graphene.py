@@ -66,31 +66,6 @@ def rotate_and_move_atoms(atoms, theta, center):
         rotated[i, 1] = s * x + c * y + center[1]
     return rotated
 
-@njit(cache=True)
-def compute_neighbors(atoms, bonds):
-    '''
-    Compute the 3 nearest neighbors for each atom based on the bonds
-    Inputs:
-        atoms : coordinates of the atoms
-        bonds : list of bonds between atoms
-    Outputs:
-        neighbors : list of nearest neighbors for each atom
-    '''
-    N = len(atoms)
-    neighbors = -np.ones((N, 3), dtype=np.int64)
-    for k in range(len(bonds)):
-        i, j = bonds[k, 0], bonds[k, 1]
-        for slot in range(3):
-            if neighbors[i, slot] == -1:
-                neighbors[i, slot] = j
-                break
-        for slot in range(3):
-            if neighbors[j, slot] == -1:
-                neighbors[j, slot] = i
-                break
-    return neighbors
-
-
 def nearest_lattice_vectors(v, B):
     '''
     Vectors of the lattices of bases B (primitive vectors as columns, (2, 2) or (n, 2, 2)) closest to v (n, 2)
@@ -205,36 +180,6 @@ def periodic_bond_lengths(atoms, bonds, L):
     return np.linalg.norm(d, axis=1)
 
 
-def load_crystal(path):
-    data = np.load(path)
-
-    L = float(data['L'][0])
-    rho = float(data['rho'][0])
-
-    vor = voronoi_from_points(L, rho, data['points'], data['theta'])
-
-    crystal = GrapheneCrystal.__new__(GrapheneCrystal)
-    crystal.lattice = vor
-    crystal.vor = vor.vor
-    crystal.all_points = vor.all_points
-    crystal.L = L
-    crystal.N = vor.N
-    crystal.points = vor.points
-    crystal.theta = vor.theta
-
-    crystal.relaxed_generators = data['relaxed_generators']
-    crystal.boundary_mask = crystal.get_boundary_mask(crystal.relaxed_generators)
-    crystal.atoms = data['atoms']
-    if 'bonds' in data.files:
-        crystal.bonds = data['bonds']
-    else:
-        # Old files: rebuild the bonds with the original atom ordering
-        _, crystal.bonds = crystal.vertices_from_generators(crystal.relaxed_generators, legacy=True)
-    crystal.neighbors = compute_neighbors(crystal.atoms, crystal.bonds)
-
-    return crystal
-
-
 class GrapheneCrystal(Lloyd, CGRelaxation):
     '''
     Create a polycrystalline graphene structure based on the Voronoi diagram
@@ -246,7 +191,6 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         theta : orientation of the grains
         atoms : coordinates of the atoms
         bonds : list of bonds between atoms
-        neighbors : list of nearest neighbors for each atom
         timings, lloyd_info, lammps_info, checks : diagnostics of the construction
     '''
     def __init__(self, voronoi: PeriodicVoronoi, a = 1.42, margin = 5, lloyd_kwargs = None, lammps_kwargs = None):
@@ -299,14 +243,13 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         self.boundary_mask = dist.min(axis=1) < margin
         return self.boundary_mask
 
-    def vertices_from_generators(self, generators, legacy = False, tol = 1e-4, pad = 10.0):
+    def vertices_from_generators(self, generators, tol = 1e-4, pad = 10.0):
         '''
         Compute the vertices of the Voronoi diagram from the generators
         Inputs:
             generators : coordinates of the generators
-            legacy : reproduce the atom ordering of the old implementation (for old files without bonds)
             tol : merging tolerance of periodic copies of a vertex
-            pad : width of the periodic images (non-legacy mode)
+            pad : width of the periodic images
         Outputs:
             atoms : coordinates of the atoms in the graphene lattice
             bonds : list of bonds between atoms
@@ -314,26 +257,17 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         L = self.L
         M = len(generators)
 
-        if legacy:
-            images = [generators + np.array([dx, dy]) for dx in [-L, 0, L] for dy in [-L, 0, L]]
-            all_gen = np.vstack(images)
-            c0, c1 = 4 * M, 5 * M
-        else:
-            all_gen = _periodic_images(np.mod(generators, L), L, pad)
-            c0, c1 = 0, M
-        vor = Voronoi(all_gen)
+        vor = Voronoi(_periodic_images(np.mod(generators, L), L, pad))
 
         rp = vor.ridge_points
         rv = np.asarray(vor.ridge_vertices)
-        central = ((rp >= c0) & (rp < c1)).any(axis=1)
+        central = (rp < M).any(axis=1)
         finite = (rv >= 0).all(axis=1)
         seq = rv[central & finite].ravel()          # vertices in order of first encounter
 
         wpos = np.mod(vor.vertices[seq], L)
         nL = int(round(L / tol))
-        keys = np.round(wpos / tol).astype(np.int64)
-        if not legacy:
-            keys %= nL                              # vertices at x = 0 and x = L are the same atom
+        keys = np.round(wpos / tol).astype(np.int64) % nL     # vertices at x = 0 and x = L are the same atom
         kid = keys[:, 0] * (nL + 2) + keys[:, 1]
 
         _, first, inv = np.unique(kid, return_index=True, return_inverse=True)
@@ -477,23 +411,8 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         )
         self.timings["lammps"] = time.perf_counter() - t0
 
-        # Compute the neighbors for each atom
-        self.neighbors = compute_neighbors(self.atoms, self.bonds)
-
         del self.vor
         del self.all_points
-
-    def plot_atoms(self, fig_size = 6, dot_size = 1):
-
-        plt.figure(figsize=(fig_size, fig_size))
-
-        plt.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
-        plt.xlim(0, self.L)
-        plt.ylim(0, self.L)
-        plt.gca().set_aspect('equal')
-        plt.xlabel(r"$x$")
-        plt.ylabel(r"$y$")
-        plt.tight_layout()
 
     def plot_bonds(self, fig_size = 6, dot_size = 1, lw = 0.5):
         plt.figure(figsize=(fig_size, fig_size))
@@ -509,30 +428,6 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         plt.xlabel(r"$x$")
         plt.ylabel(r"$y$")
         plt.tight_layout()
-
-    def plot_all(self, fig_size = 6, dot_size = 1, lw = 0.5, atom_phase = None):
-        fig, ax = plt.subplots(figsize=(fig_size*1.25, fig_size))
-
-        if atom_phase is not None:
-            phase_norm = (atom_phase + np.pi) / (2 * np.pi)
-
-            mp = ax.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, c=phase_norm, cmap='hsv', vmin=0, vmax=1, zorder=2)
-
-            cbar = fig.colorbar(mp, ax=ax, ticks=[0, 0.25, 0.5, 0.75, 1])
-            cbar.ax.set_yticklabels([r'$-\pi$', r'$-\pi/2$', r'$0$', r'$\pi/2$', r'$\pi$'], fontsize=10)
-            cbar.ax.set_ylabel(r'$\arg(\psi_6) \,\mathrm{mod}\, \pi/3$', fontsize=12)
-        else:
-            ax.scatter(self.atoms[:, 0], self.atoms[:, 1], s=dot_size, color='black')
-
-        ax.set_xlim(0, self.L)
-        ax.set_ylim(0, self.L)
-        ax.set_aspect('equal')
-        ax.set_xlabel(r"$x$")
-        ax.set_ylabel(r"$y$")
-        plt.tight_layout()
-
-    def plot_lattice(self):
-        self.lattice.plot()
 
     def save_crystal(self, path, **extra):
         '''
@@ -566,43 +461,13 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         )
 
 
-# Test
+# Test (without LAMMPS: python Graphene.py, with: Run_Simulation.py)
 
 if __name__ == "__main__":
-    import Observables as obs
-
-    _ = generate_triangular_lattice(10.0)
-
-    configs = [
-        (200,  0.0007,  "10 grains / 200Å  — test de base"),
-    ]
-
-    for L, rho, desc in configs:
-        print(f"\n{'─'*55}")
-        print(f"  {desc}")
-        print(f"{'─'*55}")
-
-        t0 = time.time()
-
-        vor = PeriodicVoronoi(L, rho)
-        crystal = GrapheneCrystal(vor)
-
-        angles = np.array([np.angle(obs.compute_psi6(i, crystal.atoms, crystal.neighbors, crystal.L))
-                           for i in range(len(crystal.atoms))])
-
-        crystal.plot_all(atom_phase=angles)
-        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_all.png", dpi=300)
-        plt.close()
-
-        crystal.plot_bonds()
-        plt.savefig(f"results/test_{L:.0f}_{rho:.0e}_bonds.png", dpi=300)
-        plt.close()
-
-        t1 = time.time()
-        print(f"  Grains   : {vor.N}")
-        print(f"  Atomes   : {len(crystal.atoms):,} Shape: {crystal.atoms.shape}")
-        print(f"  Temps    : {t1 - t0:.2f} s   {crystal.timings}")
-        print(f"  Checks   : {crystal.checks}")
-        print(f"  LAMMPS   : {crystal.lammps_info}")
-
-        crystal.save_crystal(f"results/test_{L:.0f}_{rho:.0e}.npz")
+    CGRelaxation.relaxation_CG = lambda self, atoms, *args, **kwargs: (setattr(self, "Lx", self.L), setattr(self, "Ly", self.L), atoms)[-1]
+    t0 = time.time()
+    vor = PeriodicVoronoi(200, 0.0007)
+    crystal = GrapheneCrystal(vor, a = 1.3967512290507305)
+    crystal.plot_bonds()
+    plt.savefig("test_bonds.png", dpi=300)
+    print(f"{vor.N} grains, {len(crystal.atoms)} atoms, {time.time() - t0:.1f} s  {crystal.timings}  {crystal.checks}")
