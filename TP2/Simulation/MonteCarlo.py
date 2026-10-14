@@ -231,3 +231,53 @@ def monte_carlo(theta, adj_i, adj_j, adj_length, areas, beta, epsilon, gamma, ph
             std_misor_priv = std_misor
 
     return theta, energy_history, misor_history, delta_theta
+
+
+@njit
+def representative_snapshot(theta, adj_i, adj_j, adj_length, areas, beta, delta_theta, epsilon, gamma, phi_s2, phi_s4,
+                            alpha, beta_RS, E_target, m_target, E_scale, m_scale, E_max, m_max, n_sweeps):
+    '''
+    Continue the equilibrium chain at the same temperature (on a copy, the chain itself is not modified) and return the
+    configuration whose energy and mean misorientation are closest to (E_target, m_target), distances in units of the
+    equilibrium standard deviations (E_scale, m_scale). Only configurations with E < E_max and misorientation < m_max
+    are accepted (crystal energies strictly decreasing along the anneal); if none is found, the closest one is returned.
+    The returned configuration is a genuine equilibrium configuration at this temperature, with E and misorientation at
+    the centre of their distributions instead of a random draw (+- sigma) like the last sweep.
+    Outputs:
+        configuration, its energy, its mean misorientation
+    '''
+    th = theta.copy()
+    best = theta.copy()
+    best_any = theta.copy()
+    best_d, best_E, best_m = 1e300, 0.0, 0.0
+    any_d, any_E, any_m = 1e300, 0.0, 0.0
+    for s in range(n_sweeps):
+        metropolis_sweep(th, adj_i, adj_j, adj_length, areas, beta, delta_theta, epsilon, gamma, phi_s2, phi_s4, alpha, beta_RS)
+        E = energy(th, adj_i, adj_j, adj_length, areas, epsilon, gamma, phi_s2, phi_s4, alpha, beta_RS)
+        m = mean_misorientation(th, adj_i, adj_j, adj_length)
+        d = abs(E - E_target) / E_scale + abs(m - m_target) / m_scale
+        if d < any_d:
+            any_d, any_E, any_m = d, E, m
+            best_any[:] = th
+        if E < E_max and m < m_max and d < best_d:
+            best_d, best_E, best_m = d, E, m
+            best[:] = th
+    if best_d == 1e300:
+        return best_any, any_E, any_m
+    return best, best_E, best_m
+
+
+def monotone_fit(y, err):
+    '''
+    Weighted least-squares non-decreasing fit of y (pool adjacent violators), weights 1/err^2. Used on the equilibrium
+    averages <E>(T) and <misorientation>(T) ordered by increasing T: d<E>/dT = Var(E)/T^2 >= 0, so the true curve is
+    monotone and the violations come from the statistical error of the averages.
+    '''
+    blocks = []                                   # [value, weight, count]
+    for yi, ei in zip(y, err):
+        blocks.append([float(yi), 1.0 / max(float(ei), 1e-9) ** 2, 1])
+        while len(blocks) > 1 and blocks[-2][0] > blocks[-1][0]:
+            v2, w2, c2 = blocks.pop()
+            v1, w1, c1 = blocks.pop()
+            blocks.append([(v1 * w1 + v2 * w2) / (w1 + w2), w1 + w2, c1 + c2])
+    return np.concatenate([np.full(c, v) for v, w, c in blocks])

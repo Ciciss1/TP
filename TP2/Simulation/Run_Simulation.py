@@ -9,7 +9,7 @@ from numba import njit
 from tqdm import tqdm
 
 from Voronoi import PeriodicVoronoi
-from MonteCarlo import monte_carlo
+from MonteCarlo import monte_carlo, estimate_tau_int, representative_snapshot, monotone_fit
 from Graphene import GrapheneCrystal, voronoi_from_points
 
 A_CC = 1.3967512290507305           # AIREBO equilibrium C-C distance (AA)
@@ -70,8 +70,10 @@ def anneal_one_run(run_idx, p):
     theta = vor.theta.copy()
     delta = 0.1
 
-    tasks = []
-    for t_idx, T in enumerate(sorted(p["T"], reverse=True)):
+    # Pass 1 : annealing from the highest to the lowest temperature, equilibrium averages at each T
+    temps = sorted(p["T"], reverse=True)
+    stats = []
+    for t_idx, T in enumerate(temps):
         t0 = time.perf_counter()
         theta, energy_history, misor_history, delta = monte_carlo(
             theta, vor.adj_i, vor.adj_j, vor.adj_length, vor.areas, beta=1.0 / T,
@@ -79,12 +81,37 @@ def anneal_one_run(run_idx, p):
             alpha=p["alpha"], beta_RS=p["beta_RS"], n_sweeps=p["n_monte_carlo"], use_tqdm=False, delta_theta=delta
         )
         n_done = len(energy_history)
-        converged = n_done < p["n_monte_carlo"]
-        tail = slice(-min(1000, n_done), None)
+        # equilibrium averages over the second half of the chain (the last sweep alone fluctuates by +- sigma_E)
+        E_eq = np.asarray(energy_history[n_done // 2:])
+        m_eq = np.asarray(misor_history[n_done // 2:])
+        tau_E, tau_m = estimate_tau_int(E_eq), estimate_tau_int(m_eq)
+        stats.append(dict(
+            theta=theta.copy(), delta=delta, n_done=n_done, converged=n_done < p["n_monte_carlo"],
+            E_mean=E_eq.mean(), E_err=E_eq.std() * np.sqrt(2 * tau_E / len(E_eq)), E_std=E_eq.std(), E_var=E_eq.var(),
+            m_mean=m_eq.mean(), m_err=m_eq.std() * np.sqrt(2 * tau_m / len(m_eq)), m_std=m_eq.std(),
+            time=time.perf_counter() - t0))
 
-        w(f"  [run {run_idx + 1} T={T:.4f} eV]  MC  {n_done} sweeps  "
-          f"{'converged' if converged else 'NOT converged'}  E={energy_history[-1]:+.4f} eV  "
-          f"({time.perf_counter() - t0:.1f} s)")
+    # Monotone estimates of <E>(T) and <misorientation>(T) (increasing with T)
+    order = np.arange(len(temps))[::-1]                              # increasing T
+    E_fit = np.empty(len(temps))
+    m_fit = np.empty(len(temps))
+    E_fit[order] = monotone_fit([stats[k]["E_mean"] for k in order], [stats[k]["E_err"] for k in order])
+    m_fit[order] = monotone_fit([stats[k]["m_mean"] for k in order], [stats[k]["m_err"] for k in order])
+
+    # Pass 2 : at each T, typical configuration (E, misorientation closest to the monotone estimates) for the crystal,
+    # with E and misorientation strictly below those of the crystal at the previous (higher) temperature
+    tasks = []
+    E_max, m_max = np.inf, np.inf
+    for t_idx, (T, st) in enumerate(zip(temps, stats)):
+        theta_crystal, E_snap, m_snap = representative_snapshot(
+            st["theta"], vor.adj_i, vor.adj_j, vor.adj_length, vor.areas, 1.0 / T, st["delta"],
+            p["epsilon"], p["gamma"], phi_s2, phi_s4, p["alpha"], p["beta_RS"],
+            E_fit[t_idx], m_fit[t_idx], max(st["E_std"], 1e-12), max(st["m_std"], 1e-12), E_max, m_max, p["n_select"])
+        E_max, m_max = E_snap, m_snap
+
+        w(f"  [run {run_idx + 1} T={T:.4f} eV]  MC  {st['n_done']} sweeps  "
+          f"{'converged' if st['converged'] else 'NOT converged'}  <E>={st['E_mean']:+.1f} +- {st['E_err']:.1f} eV  "
+          f"crystal E={E_snap:+.1f} eV  dtheta={np.degrees(m_snap):.2f} deg  ({st['time']:.1f} s)")
 
         save_path = sim_path(p, T, run_idx)
         tasks.append({
@@ -93,7 +120,7 @@ def anneal_one_run(run_idx, p):
             "L": p["L"],
             "rho": p["rho"],
             "points": vor.points.copy(),
-            "theta": theta.copy(),
+            "theta": theta_crystal.copy(),
             "save_path": save_path,
             "lammps_seed": derived_seed(p["seed"], run_idx, t_idx),
             "n_threads": p["n_threads"],
@@ -104,10 +131,17 @@ def anneal_one_run(run_idx, p):
                 "run": run_idx + 1,
                 "base_seed": p["seed"],
                 "run_seed": run_seed,
-                "mc_converged": converged,
-                "mc_sweeps": n_done,
-                "mc_energy": float(np.mean(energy_history[tail])),
-                "mc_misorientation": float(np.mean(misor_history[tail])),
+                "mc_converged": st["converged"],
+                "mc_sweeps": st["n_done"],
+                "mc_energy": float(st["E_mean"]),                  # equilibrium average (2nd half of the chain)
+                "mc_energy_err": float(st["E_err"]),
+                "mc_energy_var": float(st["E_var"]),               # heat capacity: C = var / T^2 (T in eV)
+                "mc_energy_fit": float(E_fit[t_idx]),              # monotone estimate used as target
+                "mc_energy_snapshot": float(E_snap),               # energy of the configuration of this crystal
+                "mc_misorientation": float(st["m_mean"]),
+                "mc_misorientation_err": float(st["m_err"]),
+                "mc_misorientation_snapshot": float(m_snap),
+                "mc_delta": float(st["delta"]),
                 "epsilon": p["epsilon"], "gamma": p["gamma"], "phi_s": p["phi_s"],
                 "alpha": p["alpha"], "beta_RS": p["beta_RS"],
             },
@@ -180,6 +214,7 @@ def load_parameters(path):
     params.setdefault("seed", None)
     params.setdefault("skip_existing", False)
     params.setdefault("lloyd_method", "lbfgs")
+    params.setdefault("n_select", 5000)                          # sweeps used to pick a typical configuration per T
     if params["seed"] is None:
         params["seed"] = int(np.random.SeedSequence().entropy % (2**32))
 
