@@ -4,7 +4,7 @@
 
 
 # ____File directory____
-output_dir =    "/scratch/escarmel/crystal_rho00135_new"
+output_dir =    "/scratch/escarmel/crystal_rho00135"
 
 # ____Hamiltonian parameters____
 epsilon =       0.0
