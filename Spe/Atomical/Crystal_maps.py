@@ -119,23 +119,23 @@ if __name__ == "__main__":
     fig.savefig(out / "overview.png", dpi=170)
     plt.close(fig)
 
-    T_zoom = T_all[np.argmin(abs(T_all - 1000 * args.zoom))] if args.zoom else T_show[len(T_show) // 2]
-    d = np.load(files[T_zoom])
-    Lx, Ly = d["lattice"]
-    segs, dtheta = grain_boundaries(d["points"], d["theta"], float(np.ravel(d["L"])[0]), Lx, Ly)
-    mid, length = segs.mean(axis=1), np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1)
-    hw = args.half_width
-    ok = (length > 10) & np.all((mid > hw) & (mid < [Lx - hw, Ly - hw]), axis=1)
-    fig, axes = plt.subplots(1, 2, figsize=(11, 5.8))
-    for ax, k, name in ((axes[0], np.flatnonzero(ok)[np.argmin(dtheta[ok])] if ok.any() else None, "joint le moins désorienté"),
-                        (axes[1], np.flatnonzero(ok)[np.argmax(dtheta[ok])] if ok.any() else None, "joint le plus désorienté")):
-        if k is None:
-            ax.axis("off")
-            continue
-        c = mid[k]
-        draw(ax, files[T_zoom], window=(c[0] - hw, c[0] + hw, c[1] - hw, c[1] + hw), edges=True)
-        ax.set_title(f"{name} : Δθ = {dtheta[k]:.1f}°", fontsize=10)
-    fig.suptitle(f"$T_{{MC}}$ = {T_zoom / 1000:g}·10³ K", fontsize=11)
-    fig.tight_layout()
-    fig.savefig(out / f"zoom_T={T_zoom}K.png", dpi=170)
-    plt.close(fig)
+    # T_zoom = T_all[np.argmin(abs(T_all - 1000 * args.zoom))] if args.zoom else T_show[len(T_show) // 2]
+    # d = np.load(files[T_zoom])
+    # Lx, Ly = d["lattice"]
+    # segs, dtheta = grain_boundaries(d["points"], d["theta"], float(np.ravel(d["L"])[0]), Lx, Ly)
+    # mid, length = segs.mean(axis=1), np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1)
+    # hw = args.half_width
+    # ok = (length > 10) & np.all((mid > hw) & (mid < [Lx - hw, Ly - hw]), axis=1)
+    # fig, axes = plt.subplots(1, 2, figsize=(11, 5.8))
+    # for ax, k, name in ((axes[0], np.flatnonzero(ok)[np.argmin(dtheta[ok])] if ok.any() else None, "joint le moins désorienté"),
+    #                     (axes[1], np.flatnonzero(ok)[np.argmax(dtheta[ok])] if ok.any() else None, "joint le plus désorienté")):
+    #     if k is None:
+    #         ax.axis("off")
+    #         continue
+    #     c = mid[k]
+    #     draw(ax, files[T_zoom], window=(c[0] - hw, c[0] + hw, c[1] - hw, c[1] + hw), edges=True)
+    #     ax.set_title(f"{name} : Δθ = {dtheta[k]:.1f}°", fontsize=10)
+    # fig.suptitle(f"$T_{{MC}}$ = {T_zoom / 1000:g}·10³ K", fontsize=11)
+    # fig.tight_layout()
+    # fig.savefig(out / f"zoom_T={T_zoom}K.png", dpi=170)
+    # plt.close(fig)
