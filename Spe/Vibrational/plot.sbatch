@@ -4,7 +4,7 @@
 #SBATCH --qos=academic
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=30
+#SBATCH --cpus-per-task=15
 #SBATCH --time=03:00:00
 #SBATCH --output=%x_%j.out
 
@@ -14,4 +14,4 @@ source ~/venvs/tp/bin/activate
 export PATH=$HOME/opt/lammps/bin:$PATH
 
 cd $SLURM_SUBMIT_DIR
-python vdos_by_defect.py /scratch/escarmel/crystal_rho0054_big/eps=0/L=544/rho=0.0054/thermalize /scratch/escarmel/crystal_rho0054_big/eps=0/L=544/rho=0.0054
+python plot_vdos.py /scratch/escarmel/crystal_rho00135_big/eps=0/L=544/rho=0.00135/thermalize
