@@ -2,8 +2,8 @@
 Structural observables of the relaxed polycrystalline graphene crystals written by
 TP2/Simulation/Run_Simulation.py (files T=<T>K_k=<k>.npz: atoms, bonds, lattice = [Lx, Ly]).
 
-Every atom has exactly three bonds (checked by the construction), so the topology is read from the
-saved bonds instead of being rebuilt from distances.
+The topology is read from the saved bonds instead of being rebuilt from distances (atoms with a number
+of bonds other than 3, left by the construction, only produce unusual rings).
 """
 import re
 import warnings
@@ -18,7 +18,6 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
-A_CC = 1.3967512290507305           # AIREBO equilibrium C-C distance (AA)
 FNAME = re.compile(r"T=(\d+)K_k=(\d+)\.npz$")
 
 
@@ -238,22 +237,7 @@ def junction_enrichment(junctions, free, Lx, Ly, seed = 0):
     return float(np.median(tree.query(rand)[0]) / np.median(tree.query(wrap(free, Lx, Ly))[0]))
 
 
-# ─────────────────────────────── Strain and smoothed maps ───────────────────────────────
-
-def shear_strain(xyz, bonds, Lx, Ly):
-    '''
-    Anisotropy of the in-plane bond tensor Q = sum_bonds b b of each atom,
-    sqrt((Qxx - Qyy)^2 + 4 Qxy^2) / (Qxx + Qyy): 0 for three equal bonds at 120 deg
-    '''
-    N = len(xyz)
-    d = bond_vectors(xyz, bonds, Lx, Ly)
-    ends = np.r_[bonds[:, 0], bonds[:, 1]]
-    dx, dy = np.r_[d[:, 0], d[:, 0]], np.r_[d[:, 1], d[:, 1]]
-    qxx = np.bincount(ends, dx * dx, minlength=N)
-    qyy = np.bincount(ends, dy * dy, minlength=N)
-    qxy = np.bincount(ends, dx * dy, minlength=N)
-    return np.sqrt((qxx - qyy) ** 2 + 4 * qxy ** 2) / (qxx + qyy)
-
+# ─────────────────────────────── Smoothed maps ───────────────────────────────
 
 def smooth_map(xy, Lx, Ly, values = None, n_grid = 128, sigma = 25.0):
     '''
@@ -325,54 +309,6 @@ def diffraction_map(xy, Lx, Ly, q_max, n_grid = 2048):
     qy = np.fft.fftshift(np.fft.fftfreq(n_grid, Ly / n_grid)) * 2 * np.pi
     ix, iy = np.abs(qx) <= q_max, np.abs(qy) <= q_max
     return S[np.ix_(ix, iy)], qx[ix], qy[iy]
-
-
-# ─────────────────────────────── Tight-binding LDOS (KPM) ───────────────────────────────
-
-def kpm_ldos(xyz, bonds, Lx, Ly, probes, e_grid, n_moments = 512, e_window = 0.15, t0 = 2.7, beta = 2.0):
-    '''
-    pz tight-binding LDOS of the probe atoms by the kernel polynomial method (Chebyshev moments with
-    the Jackson kernel, Weisse et al. RMP 78, 275 (2006)), on the GPU when available.
-    Hopping t(d) = -t0 (A_CC / d)^beta with the 3D length d of each bond.
-    Outputs:
-        ldos : (n_probes, n_e) on e_grid
-        weight : (n_probes,) integral of the LDOS over |E| < e_window
-    '''
-    import torch
-    N, P = len(xyz), len(probes)
-    t = -t0 * (A_CC / np.linalg.norm(bond_vectors(xyz, bonds, Lx, Ly), axis=1)) ** beta
-    H = coo_matrix((np.r_[t, t], (np.r_[bonds[:, 0], bonds[:, 1]], np.r_[bonds[:, 1], bonds[:, 0]])), shape=(N, N)).tocsr()
-    a = 1.05 * np.abs(H).sum(axis=1).max()              # Gershgorin bound: spectrum within [-a, a]
-    H = H / a
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float32 if device == "cuda" else torch.float64
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)              # sparse CSR support flagged as beta
-        Ht = torch.sparse_csr_tensor(torch.tensor(H.indptr, dtype=torch.int64), torch.tensor(H.indices, dtype=torch.int64),
-                                     torch.tensor(H.data, dtype=dtype), size=(N, N), device=device)
-    rows, cols = torch.tensor(probes, device=device), torch.arange(P, device=device)
-    T0 = torch.zeros((N, P), dtype=dtype, device=device)
-    T0[rows, cols] = 1.0
-    T1 = Ht @ T0
-    mu = torch.empty((n_moments, P), dtype=dtype, device=device)
-    mu[0], mu[1] = T0[rows, cols], T1[rows, cols]
-    for n in range(2, n_moments):
-        T0, T1 = T1, 2 * (Ht @ T1) - T0
-        mu[n] = T1[rows, cols]
-    mu = mu.double().cpu().numpy()
-
-    M = n_moments
-    n = np.arange(M)
-    g = ((M - n + 1) * np.cos(np.pi * n / (M + 1)) + np.sin(np.pi * n / (M + 1)) / np.tan(np.pi / (M + 1))) / (M + 1)
-    coeff = g[:, None] * mu * np.where(n == 0, 1.0, 2.0)[:, None]
-
-    def reconstruct(e):
-        th = np.arccos(np.clip(e / a, -1 + 1e-10, 1 - 1e-10))
-        return (np.cos(n[:, None] * th[None]).T @ coeff).T / (np.pi * a * np.sin(th))
-
-    e_w = np.linspace(-e_window, e_window, 801)
-    return reconstruct(e_grid), np.trapezoid(reconstruct(e_w), e_w, axis=1)
 
 
 # ─────────────────────────────── Batch over a folder ───────────────────────────────

@@ -1,7 +1,7 @@
 """
 Spatial decomposition of the VDOS of thermalised crystals (outputs of sweep_thermalize.py) with the
 topological defects of the relaxed crystal each trajectory comes from. Atoms are classified by the
-connected clusters of 5/7 rings they belong to (as in Raman_map.py), and the atoms of hexagons by
+connected clusters of 5/7 rings they belong to (defect_graph of Properties.py), and the atoms of hexagons by
 their distance to the nearest 5/7 ring:
   - grain        : atoms of hexagons only (then split into distance shells)
   - disclination : atoms of an isolated 5 or 7 ring

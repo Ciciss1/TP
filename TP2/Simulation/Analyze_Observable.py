@@ -1,6 +1,7 @@
 """
 Orientational and translational order of the crystals of a folder (T=<T>K_k=<k>.npz) vs T:
-  - G6(r) and GT(r) averaged over k, with the KTHNY bounds r^-1/4 and r^-1/3
+  - G6(r) and GT(r) averaged over k, with the KTHNY bounds r^-1/4 and r^-1/3, against r/a with a the
+    graphene lattice parameter (from the atom density of the relaxed crystals)
   - their power-law exponents eta6 and etaT, and the global order |<psi6>|
   - a map of the local lattice orientation arg(psi6)/6 for one crystal per T
 
@@ -20,14 +21,14 @@ import Observables as obs
 FNAME = re.compile(r"T=(\d+)K_k=(\d+)\.npz$")
 
 
-def plot_correlations(T, r, C, bound, ylabel, path):
+def plot_correlations(T, r, C, bound, ylabel, a, path):
     fig, ax = plt.subplots(figsize=(7, 5.5))
     colors = plt.get_cmap("viridis")(np.linspace(0, 1, len(T)))
     for t, c, col in zip(T, C, colors):
         m = np.isfinite(c)                                   # bins with no pair (small r, grid of 0.5 AA)
-        ax.loglog(r[m], c[m], color=col, label=f"T = {t} K")
-    ax.loglog(r, (r / r[0]) ** (-bound), "k--", label=rf"$r^{{-{bound:.3g}}}$")
-    ax.set(xlabel=r"$r$ ($\mathrm{\AA}$)", ylabel=ylabel)
+        ax.loglog(r[m] / a, c[m], color=col, label=f"T = {t} K")
+    ax.loglog(r / a, (r / r[0]) ** (-bound), "k--", label=rf"$r^{{-{bound:.3g}}}$")
+    ax.set(xlabel=rf"$r/a$   ($a$ = {a:.3f} $\mathrm{{\AA}}$)", ylabel=ylabel)
     ax.legend(fontsize=7, ncol=2)
     fig.tight_layout()
     fig.savefig(path)
@@ -65,6 +66,7 @@ if __name__ == "__main__":
         if r_bins is None:
             r_bins = np.geomspace(2.0, min(Lx, Ly) / 2, args.bins + 1)
             r = np.sqrt(r_bins[:-1] * r_bins[1:])
+            a = np.sqrt(4 * Lx * Ly / (np.sqrt(3) * len(xyz)))           # area per atom = sqrt(3) a^2 / 4
         G6, GT, psi, _ = obs.correlations(xyz, bonds, Lx, Ly, r_bins)
         for key, v in dict(G6=G6, GT=GT, psi6=abs(psi.mean()),
                            eta6=obs.power_law_exponent(r, G6, args.fit_min, min(Lx, Ly) / 4),
@@ -77,10 +79,10 @@ if __name__ == "__main__":
     T = np.array(sorted(res))
     mean = {key: np.array([np.mean(res[t][key], axis=0) for t in T]) for key in ("G6", "GT", "psi6", "eta6", "etaT")}
     std = {key: np.array([np.std(res[t][key], axis=0) for t in T]) for key in ("psi6", "eta6", "etaT")}
-    np.savez(folder / "observables_data.npz", T=T, r=r, **mean, **{f"{key}_std": v for key, v in std.items()})
+    np.savez(folder / "observables_data.npz", T=T, r=r, a=a, **mean, **{f"{key}_std": v for key, v in std.items()})
 
-    plot_correlations(T, r, mean["G6"], 1 / 4, r"$G_6(r)$", folder / "G6.pdf")
-    plot_correlations(T, r, mean["GT"], 1 / 3, r"$G_T(r)$", folder / "GT.pdf")
+    plot_correlations(T, r, mean["G6"], 1 / 4, r"$G_6(r)$", a, folder / "G6.pdf")
+    plot_correlations(T, r, mean["GT"], 1 / 3, r"$G_T(r)$", a, folder / "GT.pdf")
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
     for ax, key, label, bound in ((axes[0], "psi6", r"$|\langle\psi_6\rangle|$", None),
