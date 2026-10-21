@@ -27,15 +27,15 @@ if __name__ == "__main__":
     if not files:
         raise SystemExit("No *_thermalized_*.npz file")
 
-    cmap = LinearSegmentedColormap.from_list("T", ["#9ec5f4", "#2a78d6", "#0d366b"])
+    cmap = plt.get_cmap("viridis")
     norm = Normalize(files[0][0], files[-1][0])
     fig_all, ax_all = plt.subplots(figsize=(10, 5))
     print(f"{'file':>45s} {'conv':>5s} {'G (cm-1)':>9s} {'HWHM':>6s} {'w<30':>7s}")
     for T_mc, path in files:
         r = ThermalizationResult.load(path)
         dt = r.times_ps[1] - r.times_ps[0]
-        spectra = {comp: vdos(r.velocities, dt, comp=comp) for comp in ("all", "xy", "z")}
-        freq, spec = spectra["all"]
+        freq, spectra = vdos(r.velocities, dt)
+        spec = spectra["all"]
         G, hwhm = fit_G(freq, spec)
         print(f"{path.name:>45s} {str(r.converged):>5s} {G:9.1f} {hwhm:6.1f} {100 * low_freq_weight(freq, spec):6.2f}%")
 
@@ -44,9 +44,9 @@ if __name__ == "__main__":
         ax_t.axhline(r.T, color="r", ls="--", label=f"target {r.T:.0f} K")
         ax_t.set(xlabel="NVT step", ylabel="T (K)", title=f"Equilibration (converged: {r.converged})")
         ax_t.legend()
-        for comp, (f, s) in spectra.items():
-            m = f <= args.fmax
-            ax_v.plot(f[m], s[m], label=comp, lw=1.5 if comp == "all" else 0.8)
+        m = freq <= args.fmax
+        for comp, s in spectra.items():
+            ax_v.plot(freq[m], s[m], label=comp, lw=1.5 if comp == "all" else 0.8)
         ax_v.axvline(G, color="k", ls=":", lw=0.8)
         ax_v.set(xlabel=r"frequency (cm$^{-1}$)", ylabel="VDOS", title=f"{path.stem}   G = {G:.0f} cm$^{{-1}}$")
         ax_v.legend()
@@ -54,7 +54,6 @@ if __name__ == "__main__":
         fig.savefig(path.with_name(f"{path.stem}_vdos.png"), dpi=150)
         plt.close(fig)
 
-        m = freq <= args.fmax
         ax_all.plot(freq[m], spec[m] / (spec[m].sum() * (freq[1] - freq[0])), color=cmap(norm(T_mc)), lw=0.8)
 
     fig_all.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax_all, label=r"$T_{MC}$ (K)")

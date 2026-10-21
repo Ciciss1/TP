@@ -24,7 +24,8 @@ def plot_correlations(T, r, C, bound, ylabel, path):
     fig, ax = plt.subplots(figsize=(7, 5.5))
     colors = plt.get_cmap("viridis")(np.linspace(0, 1, len(T)))
     for t, c, col in zip(T, C, colors):
-        ax.loglog(r, c, color=col, label=f"T = {t} K")
+        m = np.isfinite(c)                                   # bins with no pair (small r, grid of 0.5 AA)
+        ax.loglog(r[m], c[m], color=col, label=f"T = {t} K")
     ax.loglog(r, (r / r[0]) ** (-bound), "k--", label=rf"$r^{{-{bound:.3g}}}$")
     ax.set(xlabel=r"$r$ ($\mathrm{\AA}$)", ylabel=ylabel)
     ax.legend(fontsize=7, ncol=2)

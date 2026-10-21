@@ -68,39 +68,40 @@ def bond_vectors(xyz, bonds, Lx, Ly):
 # ─────────────────────────────── Rings and topological defects ───────────────────────────────
 
 @njit(cache=True)
-def _trace_faces(nb, max_size):
+def _trace_faces(src, dst, start, max_size):
     '''
-    Faces of the planar graph (neighbours sorted counter-clockwise): each directed bond belongs to
-    exactly one face, which is followed by always turning to the next neighbour clockwise
+    Faces of the planar graph: dst[start[i]:start[i + 1]] are the neighbours of atom i sorted
+    counter-clockwise (src = i). Each directed bond belongs to exactly one face, which is followed by
+    always turning to the next neighbour clockwise. Works for any number of bonds per atom.
     '''
-    N = nb.shape[0]
-    visited = np.zeros((N, 3), dtype=np.bool_)
-    sizes = np.empty(N, dtype=np.int64)
-    atoms = -np.ones((N, max_size), dtype=np.int64)
+    M = len(dst)
+    visited = np.zeros(M, dtype=np.bool_)
+    sizes = np.empty(M, dtype=np.int64)
+    atoms = -np.ones((M, max_size), dtype=np.int64)
     n = 0
-    for i in range(N):
-        for s in range(3):
-            if visited[i, s]:
-                continue
-            a, slot, length = i, s, 0
-            while not visited[a, slot]:
-                visited[a, slot] = True
-                if length < max_size:
-                    atoms[n, length] = a
-                length += 1
-                b = nb[a, slot]
-                k = 0
-                while nb[b, k] != a:
-                    k += 1
-                a, slot = b, (k + 2) % 3
-            sizes[n] = length
-            n += 1
+    for e0 in range(M):
+        if visited[e0]:
+            continue
+        e, length = e0, 0
+        while not visited[e]:
+            visited[e] = True
+            if length < max_size:
+                atoms[n, length] = src[e]
+            length += 1
+            a, b = src[e], dst[e]
+            k = start[b]
+            while dst[k] != a:
+                k += 1
+            e = start[b] + (k - start[b] - 1) % (start[b + 1] - start[b])
+        sizes[n] = length
+        n += 1
     return sizes[:n], atoms[:n]
 
 
-def rings(xyz, bonds, Lx, Ly, max_size = 12):
+def rings(xyz, bonds, Lx, Ly, max_size = 20):
     '''
-    Rings of the crystal
+    Rings of the crystal (faces of the bond graph; atoms with a number of bonds other than 3 are
+    allowed and only produce unusual rings)
     Outputs:
         sizes : number of atoms of each ring (n_rings,)
         ring_atoms : atoms of each ring, padded with -1 (n_rings, max_size)
@@ -110,10 +111,9 @@ def rings(xyz, bonds, Lx, Ly, max_size = 12):
     src = np.r_[bonds[:, 0], bonds[:, 1]]
     dst = np.r_[bonds[:, 1], bonds[:, 0]]
     ang = np.arctan2(np.r_[d[:, 1], -d[:, 1]], np.r_[d[:, 0], -d[:, 0]])
-    if not np.all(np.bincount(src, minlength=N) == 3):
-        raise ValueError("every atom must have exactly 3 bonds")
-    nb = dst[np.lexsort((ang, src))].reshape(N, 3)
-    sizes, ring_atoms = _trace_faces(nb, max_size)
+    order = np.lexsort((ang, src))
+    start = np.r_[0, np.cumsum(np.bincount(src, minlength=N))]
+    sizes, ring_atoms = _trace_faces(src[order], dst[order], start, max_size)
     if sizes.max() > max_size:
         raise ValueError(f"ring larger than max_size = {max_size}")
     return sizes, ring_atoms

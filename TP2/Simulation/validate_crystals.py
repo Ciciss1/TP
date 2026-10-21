@@ -31,12 +31,14 @@ def min_image(d, Lx, Ly):
 
 def ring_sizes(xy, bonds, Lx, Ly):
     '''
-    Faces of the bond graph (neighbours sorted counter-clockwise, every atom has 3 bonds)
+    Faces of the bond graph (neighbours sorted counter-clockwise, any number of bonds per atom)
     '''
     N = len(xy)
     src, dst = np.r_[bonds[:, 0], bonds[:, 1]], np.r_[bonds[:, 1], bonds[:, 0]]
     d = min_image(xy[dst] - xy[src], Lx, Ly)
-    nb = dst[np.lexsort((np.arctan2(d[:, 1], d[:, 0]), src))].reshape(N, 3).tolist()
+    order = np.lexsort((np.arctan2(d[:, 1], d[:, 0]), src))
+    nb = np.split(dst[order], np.cumsum(np.bincount(src, minlength=N))[:-1])
+    nb = [x.tolist() for x in nb]
     visited, sizes = set(), []
     for u0 in range(N):
         for v0 in nb[u0]:
@@ -44,7 +46,7 @@ def ring_sizes(xy, bonds, Lx, Ly):
             while (u, v) not in visited:
                 visited.add((u, v))
                 n += 1
-                u, v = v, nb[v][(nb[v].index(u) - 1) % 3]
+                u, v = v, nb[v][(nb[v].index(u) - 1) % len(nb[v])]
             if n:
                 sizes.append(n)
     return np.array(sizes)
@@ -101,11 +103,13 @@ def analyse(path, args):
                nonbonded_min=dp[nonbonded].min() if nonbonded.any() else np.nan,
                z_rms=xyz[:, 2].std(), z_ptp=np.ptp(xyz[:, 2]),
                ring5_pct=100 * np.mean(sizes == 5), ring7_pct=100 * np.mean(sizes == 7),
-               ring_other_pct=100 * np.mean((sizes < 5) | (sizes > 7)), euler=int(np.sum(6 - sizes)))
+               ring_other_pct=100 * np.mean((sizes < 5) | (sizes > 7)),
+               n_not_3_bonds=int(np.sum(np.bincount(bonds.ravel(), minlength=N) != 3)),
+               euler=N - len(bonds) + len(sizes))                       # V - E + F = 0 on the torus
     if args.energy:
         out.update(single_point(xyz, Lx, Ly, args.lmp, args.airebo))
     flags = [name for name, bad in (("LAMMPS", not out["lmp_ok"]), ("overlap", out["nonbonded_min"] < 1.8),
-                                    ("bond", out["bond_max"] > 1.85), ("euler", out["euler"] != 0),
+                                    ("bond", out["bond_max"] > 1.85), ("euler", out["euler"] != 0), ("degree", out["n_not_3_bonds"] > 0),
                                     ("N", abs(out["N_excess_pct"]) > 2)) if bad]
     out["flags"] = ",".join(flags) or "ok"
     return out
@@ -127,7 +131,7 @@ if __name__ == "__main__":
         raise SystemExit(f"No T=*K_k=*.npz crystal in {folder}")
 
     cols = ["T_K", "N", "N_excess_pct", "mc_misor", "lmp_ok", "bond_min", "bond_max", "n_bond_gt_1_7", "nonbonded_min",
-            "z_rms", "ring5_pct", "ring7_pct", "euler"] + (["E_per_atom", "sxx", "syy"] if args.energy else []) + ["flags"]
+            "z_rms", "ring5_pct", "ring7_pct", "n_not_3_bonds", "euler"] + (["E_per_atom", "sxx", "syy"] if args.energy else []) + ["flags"]
     print("  ".join(f"{c:>13s}" for c in cols))
     for r in rows:
         print("  ".join(f"{r[c]:>13.5g}" if isinstance(r[c], (float, np.floating)) else f"{str(r[c]):>13s}" for c in cols))

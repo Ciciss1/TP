@@ -12,6 +12,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import numpy as np
+import scipy.fft
 from scipy.optimize import curve_fit
 
 C_MASS = 12.011         # amu
@@ -35,7 +36,7 @@ class ThermalizationResult:
     converged: bool            # NVT stopped on the PE criterion (False: equil_max_ps reached)
 
     def save(self, path):
-        np.savez_compressed(path, **asdict(self))
+        np.savez(path, **asdict(self))                # velocities hardly compress: plain is ~10x faster to load
 
     @staticmethod
     def load(path):
@@ -170,28 +171,30 @@ write_data {tmp / 'final.data'} nocoeff
         return v
 
 
-def vdos(velocities, dt_ps, atoms = None, comp = "all", batch = 5000):
+def vdos(velocities, dt_ps, atoms = None, batch = 2000, workers = -1):
     '''
     Vibrational density of states: windowed power spectrum of the velocities (Wiener-Khinchin
-    equivalent of the Fourier transform of the VACF), centre-of-mass drift removed, unit area
+    equivalent of the Fourier transform of the VACF), centre-of-mass drift removed, unit area.
+    One pass over the trajectory in single precision, FFT on all cores (scipy, workers = -1).
     Inputs:
         velocities : (n_frames, n_atoms, 3), dt_ps : time between frames (ps)
         atoms : indices or boolean mask of the atoms (None: all)
-        comp : "all", "xy" or "z"
     Outputs:
-        frequencies (cm^-1), spectrum
+        frequencies (cm^-1), spectra {"all", "xy", "z"}
     '''
     n_frames, n_atoms, _ = velocities.shape
     idx = np.arange(n_atoms) if atoms is None else np.arange(n_atoms)[atoms]
-    cols = {"all": [0, 1, 2], "xy": [0, 1], "z": [2]}[comp]
-    v_com = velocities.mean(axis=1, keepdims=True, dtype=np.float64)
-    window = np.hanning(n_frames)[:, None, None]
-    power = 0.0
+    v_com = velocities.mean(axis=1, keepdims=True, dtype=np.float64).astype(np.float32)
+    window = np.hanning(n_frames).astype(np.float32)[:, None]
+    power = np.zeros((3, n_frames // 2 + 1))
     for start in range(0, len(idx), batch):
-        v = (velocities[:, idx[start:start + batch]] - v_com)[:, :, cols] * window
-        power = power + (np.abs(np.fft.rfft(v, axis=0)) ** 2).sum(axis=(1, 2))
+        v = velocities[:, idx[start:start + batch]] - v_com                   # (n_frames, n, 3)
+        v = (v.reshape(n_frames, -1) * window).T                              # (3 n, n_frames)
+        F = scipy.fft.rfft(v, axis=1, workers=workers)
+        power += (F.real ** 2 + F.imag ** 2).reshape(-1, 3, F.shape[1]).sum(axis=0, dtype=np.float64)
     freq = np.fft.rfftfreq(n_frames, dt_ps) * THZ_TO_CM
-    return freq, power / np.trapezoid(power, freq)
+    spectra = {"all": power.sum(axis=0), "xy": power[:2].sum(axis=0), "z": power[2]}
+    return freq, {k: s / np.trapezoid(s, freq) for k, s in spectra.items()}
 
 
 def fit_G(freq, spec, lo = 1450, hi = 1950):
