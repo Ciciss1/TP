@@ -18,6 +18,12 @@ from Voronoi import PeriodicVoronoi
 from Lloyd import Lloyd, _periodic_images
 from CG_Relaxation import CGRelaxation
 
+# A boundary of length l between grains misoriented by dtheta needs n = l dtheta / b geometrically
+# necessary dislocations (Frank, b = lattice parameter). While the misfit accumulated along it stays below
+# KAPPA lattice vectors it is coherent (purely elastic), above the misfit is released by dislocations.
+# Calibrated with AIREBO by calibrate_kappa.py (grain held at dtheta in an aligned matrix).
+KAPPA = 1.3
+
 
 @njit(cache=True)
 def generate_triangular_lattice(L, a_CC = 1.42):
@@ -97,25 +103,34 @@ def boundary_views(points, theta, all_points, vor):
     owner, other, segs = np.concatenate(owner), np.concatenate(other), np.concatenate(segs)
     ok = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1) > 1e-10
     owner, other, segs = owner[ok], other[ok], segs[ok]
-    dtheta = np.abs((theta[owner] - theta[other % N] + np.pi / 6) % (np.pi / 3) - np.pi / 6)
-    return owner, other, segs, dtheta
+    return owner, other, segs, dtheta_of(theta, owner, other % N)
 
 
-def lattice_origins(points, bases, all_points, owner, other, segs, dtheta, theta_c = np.radians(3.0)):
+def dtheta_of(theta, i, j):
+    '''
+    Misorientation of grains i and j, in [0, 30 deg]
+    '''
+    return np.abs((theta[i] - theta[j] + np.pi / 6) % (np.pi / 3) - np.pi / 6)
+
+
+def lattice_origins(points, bases, all_points, owner, other, segs, dtheta, b, kappa):
     '''
     Rigid translation of each grain lattice. Along the maximum spanning tree of the grain graph, weighted
-    by l exp(-dtheta / theta_c) (l : boundary length), the lattice point of the parent closest to the
-    middle of the common boundary is made a lattice point of the child: aligned neighbours form a single
-    crystal and weakly misoriented ones are in registry. The frustration of the loops of grains ends up
-    on the non-tree edges, i.e. on the most misoriented and shortest boundaries.
+    by l exp(-n / kappa) (l : boundary length, n = l dtheta / b : number of dislocations it needs), the
+    lattice point of the parent closest to the middle of the common boundary is made a lattice point of
+    the child: aligned neighbours form a single crystal and coherent boundaries are in registry. The
+    frustration of the loops of grains ends up on the non-tree edges, i.e. on dislocated boundaries.
     '''
     N = len(points)
-    w = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1) * np.exp(-dtheta / theta_c)
+    l = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1)
+    log_w = np.log(l) - l * dtheta / (b * max(kappa, 1e-12))
     best = {}
-    for k in np.argsort(w):                               # heaviest boundary of each pair of grains
+    for k in np.argsort(log_w):                           # heaviest boundary of each pair of grains
         best[(int(owner[k]), int(other[k] % N))] = k
     ks = np.array(list(best.values()))
-    tree = minimum_spanning_tree(coo_matrix((1 / w[ks], (owner[ks], other[ks] % N)), shape=(N, N)).tocsr())
+    rank = np.empty(len(ks))
+    rank[np.argsort(-log_w[ks])] = np.arange(1, len(ks) + 1)   # the tree only depends on the order of the weights
+    tree = minimum_spanning_tree(coo_matrix((rank, (owner[ks], other[ks] % N)), shape=(N, N)).tocsr())
     order, pred = breadth_first_order(tree + tree.T, 0, directed=False)
 
     origins = np.array(points, dtype=np.float64)
@@ -128,14 +143,58 @@ def lattice_origins(points, bases, all_points, owner, other, segs, dtheta, theta
     return origins
 
 
-def blend_displacement(x, segs, n_origins, n_bases, dtheta, a, theta_b = np.radians(15.0)):
+def coherent_references(points, theta, bases, origins, all_points, owner, other, segs, n_origins, b, kappa):
     '''
-    Elastic accommodation of the boundaries of one grain. A generator within a of a boundary is moved
-    halfway towards the closest point of the neighbour lattice (the neighbour does the same), so that
-    the two lattices meet continuously; the misfit, wrapped into the unit cell, only jumps where it
-    reaches half a lattice vector, i.e. at the geometrically necessary dislocations. The other generators
-    follow the discrete harmonic extension of these displacements. Switched off for high-angle
-    boundaries by 1 / (1 + (dtheta / theta_b)^4).
+    Coherent boundaries and their reference: a lattice point q of the owner and its partner p in the
+    neighbour lattice, the partners of the other lattice points following without wrapping, so that the
+    misfit at distance r from q is about dtheta r. All the boundaries of a grain with one lattice (aligned
+    neighbours in registry) share the lattice point closest to the centre of the grain, and both views of a
+    boundary use the reference of the side where this contact is the longest: a grain coherent with its
+    whole surroundings is a strained inclusion without dislocation. A boundary is coherent when the misfit
+    at its far end is below kappa lattice vectors, dtheta r_max / b < kappa (n = l dtheta / b for a regular
+    hexagonal grain). Outputs: coherent (n,), q, p (n, 2) in the frame of the owner
+    '''
+    N = len(points)
+    nb = other % N
+    l = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1)
+    mid = segs.mean(axis=1)
+    image = all_points[other] - points[nb]                # frame of the neighbour -> frame of the owner
+    frac = np.einsum("kij,kj->ki", np.linalg.inv(bases[nb]), n_origins)
+    groups = {}
+    for k in range(len(owner)):
+        key = (int(owner[k]), round(float(theta[nb[k]] % (np.pi / 3)), 9), *(np.round(frac[k], 6) % 1).tolist())
+        groups.setdefault(key, []).append(k)
+    q_ref, p_ref, contact = np.empty((len(owner), 2)), np.empty((len(owner), 2)), np.empty(len(owner))
+    for ks in groups.values():
+        i, k0 = owner[ks[0]], ks[0]
+        q = origins[i] + nearest_lattice_vectors((points[i] - origins[i])[None], bases[i])[0]
+        q_ref[ks] = q
+        p_ref[ks] = n_origins[k0] + nearest_lattice_vectors((q - n_origins[k0])[None], bases[nb[k0]])[0]
+        contact[ks] = l[ks].sum()
+
+    views = {}
+    for k in range(len(owner)):
+        views.setdefault((int(owner[k]), int(nb[k])), []).append(k)
+    q_own, p_own = q_ref.copy(), p_ref.copy()
+    for k in range(len(owner)):
+        cand = views.get((int(nb[k]), int(owner[k])), [])
+        t = cand[np.argmin([np.linalg.norm(mid[c] + image[k] - mid[k]) for c in cand])] if cand else k
+        if contact[t] > contact[k] or (contact[t] == contact[k] and owner[t] < owner[k]):
+            q_ref[k], p_ref[k] = p_own[t] + image[k], q_own[t] + image[k]
+    r_max = np.linalg.norm(segs - q_ref[:, None], axis=2).max(axis=1)
+    return dtheta_of(theta, owner, nb) * r_max / b < kappa, q_ref, p_ref
+
+
+def blend_displacement(x, segs, n_origins, n_bases, basis, coherent, q_ref, p_ref, a):
+    '''
+    Elastic accommodation of the boundaries of one grain (lattice basis `basis`). A generator within a
+    of a boundary is moved halfway towards its partner in the neighbour lattice (the neighbour does the
+    same), so that the two lattices meet continuously. On a dislocated boundary the partner is the
+    closest neighbour lattice point: the misfit, wrapped into the unit cell, jumps where it reaches half
+    a lattice vector, i.e. at the geometrically necessary dislocations. On a coherent boundary the
+    partners follow the reference pair (q_ref, p_ref) of coherent_references without wrapping: no
+    dislocation, the misfit is stored as strain. The other generators follow the discrete harmonic
+    extension of these displacements.
     '''
     disp = np.zeros_like(x)
     t = segs[:, 1] - segs[:, 0]
@@ -147,7 +206,14 @@ def blend_displacement(x, segs, n_origins, n_bases, dtheta, a, theta_b = np.radi
         return disp
     o = n_origins[k[bnd]]
     rho = x[bnd] - o - nearest_lattice_vectors(x[bnd] - o, n_bases[k[bnd]])
-    disp[bnd] = -0.5 * rho / (1 + (dtheta[k[bnd]] / theta_b) ** 4)[:, None]
+    U = np.array([[0, -1], [1, 1]])                             # rotation by 60 deg in lattice coordinates
+    for j in np.flatnonzero(coherent):
+        sel = k[bnd] == j
+        # lattice vector of the grain -> its partner, the closest to the identity among the 6 equivalent maps
+        M = min((n_bases[j] @ np.linalg.matrix_power(U, m) @ np.linalg.inv(basis) for m in range(6)),
+                key=lambda M: np.abs(M - np.eye(2)).sum())
+        rho[sel] = x[bnd][sel] - p_ref[j] - (x[bnd][sel] - q_ref[j]) @ M.T
+    disp[bnd] = -0.5 * rho
     if bnd.all():
         return disp
 
@@ -324,8 +390,10 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
         F = self.L * np.linalg.inv(nearest_lattice_vectors(self.L * np.eye(2), R(theta_mean) @ B0).T)
         bases = np.array([F @ R(t) @ B0 for t in self.theta])
         v_owner, v_other, v_segs, v_dtheta = boundary_views(self.points, self.theta, self.all_points, self.vor)
-        origins = lattice_origins(self.points, bases, self.all_points, v_owner, v_other, v_segs, v_dtheta)
+        origins = lattice_origins(self.points, bases, self.all_points, v_owner, v_other, v_segs, v_dtheta, a, KAPPA)
         v_origins = origins[v_other % self.N] + self.all_points[v_other] - self.points[v_other % self.N]
+        v_coherent, v_q, v_p = coherent_references(self.points, self.theta, bases, origins, self.all_points, v_owner,
+                                                   v_other, v_segs, v_origins, a, KAPPA)
 
         # Generate base Lattice
         mean_grain_radius = 1 / np.sqrt(np.pi * self.lattice.rho)
@@ -367,7 +435,8 @@ class GrapheneCrystal(Lloyd, CGRelaxation):
 
             v = v_owner == i
             rot_atoms = rot_atoms + blend_displacement(rot_atoms, v_segs[v] + shift, v_origins[v] + shift,
-                                                       bases[v_other[v] % self.N], v_dtheta[v], a)
+                                                       bases[v_other[v] % self.N], bases[i], v_coherent[v],
+                                                       v_q[v] + shift, v_p[v] + shift, a)
             _, owner = owner_tree.query(rot_atoms)
             all_generators.append(rot_atoms)
             across.append(owner != grain)
