@@ -4,7 +4,7 @@
 
 
 # ____File directory____
-output_dir =    "/scratch/escarmel/crystal_rho0054_big_2"
+output_dir =    "/scratch/escarmel/crystal_rho00135_kappa_test"  
 
 # ____Hamiltonian parameters____
 epsilon =       0.0
@@ -14,19 +14,19 @@ alpha =         1.70            # (eV/AA)
 beta_RS =       -0.161
 
 # ____Lattice parameters____
-L =             544            # (AA)
-rho =           0.0054          # (grains/AA^2)
+L =             120           # (AA)
+rho =           0.00135          # (grains/AA^2)
 
 # ____Monte Carlo parameters____
 n_monte_carlo = 300_000
 
 # ____Temperature____
-T =             [100, 90, 80, 70, 65, 60, 55, 50, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 25, 20, 15, 10, 5, 0.1] # (10^3 K, converted to eV in Run_Simulation)
+T =             [120, 100, 95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80, 79, 78, 76, 75, 70, 65, 60, 50, 40, 30, 20, 10, 5] # (10^3 K, converted to eV in Run_Simulation)
 n_runs =        1
 
 # ____Parallelism / reproducibility (optional)____
 n_threads =     2               # OpenMP threads per LAMMPS process
-n_workers =     30              # crystals built in parallel (n_workers * n_threads <= cores)
+n_workers =     31              # crystals built in parallel (n_workers * n_threads <= cores)
 seed =          None            # None = random, saved in each .npz
 skip_existing = False           # do not rebuild crystals already on disk
 lloyd_method =  "lbfgs"         # "lbfgs" (fast) or "lloyd" (plain Lloyd)

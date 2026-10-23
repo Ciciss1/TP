@@ -19,10 +19,23 @@ from Lloyd import Lloyd, _periodic_images
 from CG_Relaxation import CGRelaxation
 
 # A boundary of length l between grains misoriented by dtheta needs n = l dtheta / b geometrically
-# necessary dislocations (Frank, b = lattice parameter). While the misfit accumulated along it stays below
-# KAPPA lattice vectors it is coherent (purely elastic), above the misfit is released by dislocations.
-# Calibrated with AIREBO by calibrate_kappa.py (grain held at dtheta in an aligned matrix).
-KAPPA = 1.3
+# necessary dislocations (Frank, b = lattice parameter). While the misfit accumulated at its far end, at
+# distance r from the reference of the grain, stays below KAPPA lattice vectors (dtheta r / b < KAPPA)
+# the boundary is coherent (purely elastic); above, the misfit is released by dislocations.
+# KAPPA = 1.6 +- 0.2: AIREBO calibration of calibrate_kappa.py (grain held at dtheta in an aligned matrix,
+# 30 grains, r = 7.4 to 23 AA, no significant size dependence once the smallest grains are included).
+# The relaxed energies of the polycrystals (kappa_scan.py) vary by less than 2 % for KAPPA = 0.8 to 2, and
+# the order parameters (kappa_observables.py) do not change between 1.0 and 1.6; the 5/7 count of the
+# disordered phase does, by ~10 %. A pair (k0, k1) gives a size-dependent kappa(r) = k0 + k1 ln(r / b).
+KAPPA = 1.6
+
+
+def kappa_at(kappa, r, b):
+    '''
+    Threshold kappa(r) = k0 + k1 ln(r / b) (kappa = (k0, k1)) or kappa (a number)
+    '''
+    k0, k1 = kappa if np.ndim(kappa) else (kappa, 0.0)
+    return np.maximum(k0 + k1 * np.log(r / b), 1e-12)
 
 
 @njit(cache=True)
@@ -116,14 +129,14 @@ def dtheta_of(theta, i, j):
 def lattice_origins(points, bases, all_points, owner, other, segs, dtheta, b, kappa):
     '''
     Rigid translation of each grain lattice. Along the maximum spanning tree of the grain graph, weighted
-    by l exp(-n / kappa) (l : boundary length, n = l dtheta / b : number of dislocations it needs), the
+    by l exp(-n / kappa(l)) (l : boundary length, n = l dtheta / b : number of dislocations it needs), the
     lattice point of the parent closest to the middle of the common boundary is made a lattice point of
     the child: aligned neighbours form a single crystal and coherent boundaries are in registry. The
     frustration of the loops of grains ends up on the non-tree edges, i.e. on dislocated boundaries.
     '''
     N = len(points)
     l = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1)
-    log_w = np.log(l) - l * dtheta / (b * max(kappa, 1e-12))
+    log_w = np.log(l) - l * dtheta / (b * kappa_at(kappa, l, b))
     best = {}
     for k in np.argsort(log_w):                           # heaviest boundary of each pair of grains
         best[(int(owner[k]), int(other[k] % N))] = k
@@ -151,7 +164,7 @@ def coherent_references(points, theta, bases, origins, all_points, owner, other,
     neighbours in registry) share the lattice point closest to the centre of the grain, and both views of a
     boundary use the reference of the side where this contact is the longest: a grain coherent with its
     whole surroundings is a strained inclusion without dislocation. A boundary is coherent when the misfit
-    at its far end is below kappa lattice vectors, dtheta r_max / b < kappa (n = l dtheta / b for a regular
+    at its far end is below kappa lattice vectors, dtheta r_max / b < kappa(r_max) (n = l dtheta / b for a regular
     hexagonal grain). Outputs: coherent (n,), q, p (n, 2) in the frame of the owner
     '''
     N = len(points)
@@ -182,7 +195,7 @@ def coherent_references(points, theta, bases, origins, all_points, owner, other,
         if contact[t] > contact[k] or (contact[t] == contact[k] and owner[t] < owner[k]):
             q_ref[k], p_ref[k] = p_own[t] + image[k], q_own[t] + image[k]
     r_max = np.linalg.norm(segs - q_ref[:, None], axis=2).max(axis=1)
-    return dtheta_of(theta, owner, nb) * r_max / b < kappa, q_ref, p_ref
+    return dtheta_of(theta, owner, nb) * r_max / b < kappa_at(kappa, r_max, b), q_ref, p_ref
 
 
 def blend_displacement(x, segs, n_origins, n_bases, basis, coherent, q_ref, p_ref, a):

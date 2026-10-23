@@ -176,17 +176,20 @@ def run(args):
 
 def crossing(theta, dE, tol = 0.5):
     '''
-    Angle where E_coh - E_disl becomes positive: first point above tol (eV, below it the two
-    constructions are the same: no dislocation yet), linearly interpolated with the previous one.
-    inf if the coherent grain is always the cheapest (theta* above the largest angle)
+    Angle where E_coh - E_disl becomes positive for good: after the last point below tol (eV; below it
+    the two constructions are the same, no dislocation yet), linearly interpolated with the next one.
+    Points above tol at smaller angles (a failed relaxation) are ignored and counted.
+    Outputs: theta* (inf if the coherent grain is the cheapest up to the largest angle), number of
+    ignored points
     '''
-    k = np.flatnonzero(dE > tol)
-    if not len(k):
-        return np.inf
-    k = k[0]
-    if k == 0:
-        return theta[0]
-    return theta[k - 1] + (theta[k] - theta[k - 1]) * dE[k - 1] / (dE[k - 1] - dE[k])
+    below = np.flatnonzero(dE <= tol)
+    j = below[-1] if len(below) else -1
+    ignored = int((dE[:max(j, 0)] > tol).sum())
+    if j == len(dE) - 1:
+        return np.inf, ignored
+    if j < 0:
+        return theta[0], ignored
+    return theta[j] + (theta[j + 1] - theta[j]) * dE[j] / (dE[j] - dE[j + 1]), ignored
 
 
 def analyse(args):
@@ -204,7 +207,7 @@ def analyse(args):
     fig, (ax_e, ax_k) = plt.subplots(1, 2, figsize=(12, 4.5))
     cmap = plt.get_cmap("viridis")
     ns = sorted({n for n, _ in data})
-    kappas = {}
+    kappas, points = {}, []
     print(f"{'n':>3s} {'seed':>4s} {'d (AA)':>7s} {'r (AA)':>7s} {'theta*':>7s} {'kappa':>6s}")
     for (n, seed), D in sorted(data.items()):
         th = np.array(sorted(t for t in D if {"coh", "disl"} <= set(D[t])))
@@ -214,11 +217,13 @@ def analyse(args):
         dE = exc("coh") - exc("disl")
         first = D[th[0]]["coh"]
         l, d = first.get("r_mean", first["l_mean"]), first["d"]   # regular hexagon: r = l
-        ts = crossing(th, dE)
+        ts, ignored = crossing(th, dE)
         kappa = np.radians(ts) * l / A
         kappas.setdefault(n, []).append(kappa)
-        print(f"{n:3d} {seed:4d} {d:7.1f} {l:7.1f} {ts:7.2f} {kappa:6.2f}" if np.isfinite(ts) else
-              f"{n:3d} {seed:4d} {d:7.1f} {l:7.1f}  > {th[-1]:g}  > {np.radians(th[-1]) * l / A:.2f}")
+        points.append((n, l, kappa, np.radians(th[-1]) * l / A))
+        flag = f"   ({ignored} point(s) above 0.5 eV at a smaller angle ignored)" if ignored else ""
+        print((f"{n:3d} {seed:4d} {d:7.1f} {l:7.1f} {ts:7.2f} {kappa:6.2f}" if np.isfinite(ts) else
+               f"{n:3d} {seed:4d} {d:7.1f} {l:7.1f}  > {th[-1]:g}  > {np.radians(th[-1]) * l / A:.2f}") + flag)
         col = cmap(ns.index(n) / max(1, len(ns) - 1))
         ax_e.plot(np.radians(th) * l / A, dE, "o-", color=col, lw=0.8, ms=3, label=f"d = {d:.0f} Å" if seed == 0 else None)
     ax_e.axhline(0, color="k", lw=0.8)
@@ -228,20 +233,40 @@ def analyse(args):
 
     if not kappas:
         raise SystemExit("no crystal with both constructions at two angles or more yet")
-    all_k = np.concatenate([np.array(k) for k in kappas.values()])
-    all_k = all_k[np.isfinite(all_k)]
     for n in ns:
         k_all = np.array(kappas.get(n, []))
         k = k_all[np.isfinite(k_all)]
         d = n * A / 3
-        if len(k):
-            ax_k.errorbar(d, k.mean(), k.std(), fmt="o", capsize=3, color="C0")
         print(f"d = {d:5.1f} AA : kappa = {k.mean() if len(k) else np.nan:.2f} +- {k.std() if len(k) else np.nan:.2f} "
               f"({len(k)} crystals, {len(k_all) - len(k)} more where the coherent grain always wins)")
-    if len(all_k):
-        ax_k.axhline(all_k.mean(), color="C1", ls="--", label=f"κ = {all_k.mean():.2f} ± {all_k.std():.2f}")
-        print(f"all : KAPPA = {all_k.mean():.2f} +- {all_k.std():.2f} (standard error {all_k.std() / np.sqrt(len(all_k)):.2f})")
-    ax_k.set(xlabel="taille du grain d (Å)", ylabel=r"$\kappa = \theta^* r / b$", title="seuil cohérent / disloqué")
+    n_pt, r, k, k_min = np.array(points).T
+    censored = {int(n) for n, kk in zip(n_pt, k) if not np.isfinite(kk)}
+    fit = np.isfinite(k) & ~np.isin(n_pt, list(censored))
+    ax_k.plot(r[fit], k[fit], "o", color="C0", ms=4)
+    ax_k.plot(r[~fit & np.isfinite(k)], k[~fit & np.isfinite(k)], "o", mfc="none", color="C0", ms=4, label="hors fit")
+    ax_k.plot(r[~np.isfinite(k)], k_min[~np.isfinite(k)], "^", mfc="none", color="C3", ms=5,
+              label="pas de croisement (borne inf.)")
+    k_all = k
+    r, k = r[fit], k[fit]
+    for n in sorted(censored):
+        m = n_pt == n
+        print(f"d = {n * A / 3:5.1f} AA left out of the fit: the coherent grain wins up to the largest angle in "
+              f"{int((m & ~np.isfinite(k_all)).sum())}/{int(m.sum())} "
+              f"crystals, kappa is only bounded from below there (add larger angles or leave it out)")
+    if len(k):
+        ax_k.axhline(k.mean(), color="C1", ls="--", label=f"κ = {k.mean():.2f} ± {k.std():.2f}")
+        print(f"all : KAPPA = {k.mean():.2f} +- {k.std():.2f} (standard error {k.std() / np.sqrt(len(k)):.2f})")
+    if len(k) > 3 and np.ptp(np.log(r)) > 0:
+        X = np.c_[np.ones_like(r), np.log(r / A)]
+        c = np.linalg.lstsq(X, k, rcond=None)[0]
+        res = k - X @ c
+        err = np.sqrt(np.diag(res @ res / (len(k) - 2) * np.linalg.inv(X.T @ X)))
+        rr = np.linspace(r.min(), r.max(), 100)
+        ax_k.plot(rr, c[0] + c[1] * np.log(rr / A), "C2", label=f"κ = {c[0]:.2f} + {c[1]:.2f} ln(r/b)")
+        print(f"fit : kappa(r) = {c[0]:.2f} (+- {err[0]:.2f}) + {c[1]:.2f} (+- {err[1]:.2f}) ln(r / b) for r = "
+              f"{r.min():.1f} to {r.max():.1f} AA, rms {np.sqrt(np.mean(res**2)):.2f} (constant: {k.std():.2f})"
+              f"  ->  KAPPA = ({c[0]:.2f}, {c[1]:.2f})")
+    ax_k.set(xlabel="r (Å), centre du grain - bout du joint", ylabel=r"$\kappa = \theta^* r / b$", title="seuil cohérent / disloqué")
     ax_k.legend(fontsize=8)
     for ax in (ax_e, ax_k):
         ax.grid(alpha=0.3)
